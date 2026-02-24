@@ -1,56 +1,39 @@
 /**
- * Slack Direct Message Sender
- * 
- * This script reads recipient names and messages from a Google Sheet
- * and sends Slack direct messages to each recipient.
- * 
- * SUPPORTS BOTH BOT AND USER TOKENS:
- * - Bot Token: Messages appear FROM THE BOT (one token for all users)
- * - User Token: Messages appear FROM YOUR PERSONAL SLACK ACCOUNT
- * 
- * SETUP INSTRUCTIONS:
- * 1. Open your Google Sheet
- * 2. Go to Extensions > Apps Script
- * 3. Paste this code
- * 4. Replace 'YOUR_SLACK_BOT_TOKEN' below with your token:
- *    - Bot token (starts with xoxb-) OR
- *    - User token (starts with xoxp-)
- * 5. Save the script
- * 6. Refresh your Google Sheet - you'll see a new "Slack Tools" menu
- * 7. Set TOKEN TYPE in Row 4, Column A: "Bot" or "User"
- * 
- * SHEET FORMAT (auto-created):
- * Row 1: "TAB NAME:" label
- * Row 2: Tab name input field
- * Row 3: "TOKEN TYPE:" label
- * Row 4: Token type input ("Bot" or "User")
- * Row 5: Headers (Recipient Name, Message, Status, Response)
- * Row 6+: Data rows
- * 
- * TO GET YOUR TOKEN:
- * Bot Token:
- * 1. Go to https://api.slack.com/apps
- * 2. Select your app (e.g., "BulkDM")
- * 3. Go to "OAuth & Permissions"
- * 4. Copy the "Bot User OAuth Token" (starts with xoxb-)
- * 
- * User Token:
- * 1. Use browser extension (e.g., "Slack User Token Fetcher") OR
- * 2. OAuth flow if app supports user scopes OR
- * 3. Legacy tokens (may be deprecated)
- * 4. Required scopes: chat:write, im:write, users:read, im:history
- * 5. Copy the token (starts with xoxp-)
- * Note: User tokens are harder to obtain - see SETUP_GUIDE.md for details
- * 
- * Required scopes for both: chat:write, im:write, users:read, im:history
+ * BULKDM – Setup, connect, use
+ *
+ * 1. SETUP
+ *    • Open your Google Sheet → Extensions → Apps Script. Paste this entire file (replace any existing code). Save.
+ *    • In the sheet: Row 2 = tab name where your data lives. Row 4 = "Bot" or "User". Row 5 = headers. Row 6+ = Recipient, Message, Status, Response.
+ *    • Refresh the sheet. You should see menu "Slack Tools". If not: in Apps Script pick "onOpen" in the dropdown → Run.
+ *
+ * 2. CONNECT TO SLACK
+ *    • Bot: Go to api.slack.com/apps → your app → OAuth & Permissions. Copy "Bot User OAuth Token" (xoxb-...). Paste it in CONFIG below for SLACK_BOT_TOKEN.
+ *    • User (send as yourself): Same app → add User Token Scopes: chat:write, im:write, users:read, users:read.email, im:history. Use "Connect to Slack" in Slack Tools, or paste a user token (xoxp-...) into SLACK_BOT_TOKEN. Set Row 4 to "User".
+ *
+ * 3. USE
+ *    • Slack Tools → Send Messages: sends DMs from the sheet (from Bot or from you if User).
+ *    • Slack Tools → Read Responses: pulls replies into the Response column.
+ *    • Slack Tools → Test Connection: checks token. Setup Headers: resets sheet labels/format.
  */
+const SLACK_BOT_TOKEN = 'YOUR_SLACK_BOT_TOKEN';
+const SLACK_CLIENT_ID = '3895842157.10360289984709';
+const SLACK_CLIENT_SECRET = '19ea914a1237c9b07f677b53efe83045';
+const SLACK_REDIRECT_URI = 'https://script.google.com/a/macros/samsara.com/s/AKfycbzWeDVnX7JPvOOto8bdkDILeOgs1TmJAH01iXrfo8JHewLeWXw2HfQq53_b7nRPKuv6/exec';
 
-// ============================================
-// CONFIGURATION - UPDATE THIS WITH YOUR TOKEN
-// ============================================
-// Replace with your Bot token (xoxb-...) OR User token (xoxp-...)
-// Set TOKEN TYPE in Row 4, Column A of your sheet to match
-const SLACK_BOT_TOKEN = 'YOUR_SLACK_BOT_TOKEN'; // Can be Bot or User token
+// User scopes requested when someone clicks "Add to Slack" (for sending DMs as themselves)
+// users:read.email enables lookup-by-email so we only look up recipients instead of pulling the full list
+const SLACK_USER_SCOPES = 'chat:write,im:write,users:read,users:read.email,im:history';
+
+// Key for storing token in Document Properties (per-sheet); no copy-paste needed after Connect to Slack
+const SLACK_TOKEN_PROPERTY = 'SLACK_TOKEN';
+
+// Cache for Slack user list (avoids re-fetching every run). TTL in seconds; max 21600 (6 hours).
+// Stored as a list; updated with every API page. Lookup map is built from the list for fast name lookups.
+const SLACK_USERS_CACHE_TTL = 3600;
+const SLACK_USERS_CACHE_KEY = 'SLACK_USERS';
+
+// Set to 200 or 400 to only fetch that many users (faster first run). Set to 0 to fetch all (slower).
+const MAX_USERS_TO_FETCH = 0;
 
 // Optional: Customize these if your sheet has different column positions
 const COLUMN_RECIPIENT = 1; // Column A
@@ -76,15 +59,197 @@ const ROW_DATA_START = 6;           // Row 6: Data starts here
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
   ui.createMenu('Slack Tools')
+    .addItem('Connect to Slack', 'showConnectToSlackSidebar')
     .addItem('Send Messages', 'sendAllMessages')
     .addItem('Read Responses', 'readAllResponses')
     .addItem('Test Connection', 'testSlackConnection')
+    .addSeparator()
+    .addItem('Get User Token (OAuth)', 'showGetUserTokenDialog')
     .addSeparator()
     .addItem('Setup Headers', 'setupHeaders')
     .addToUi();
   
   // Automatically set up headers if sheet is empty or missing headers
   setupHeaders();
+}
+
+/**
+ * Opens a dialog with a link to the "Get User Token" OAuth page.
+ * Users click the link to authorize with Slack and copy their User Token into the sheet.
+ */
+function showGetUserTokenDialog() {
+  const ui = SpreadsheetApp.getUi();
+  const redirectUri = (typeof SLACK_REDIRECT_URI !== 'undefined' && SLACK_REDIRECT_URI) ? SLACK_REDIRECT_URI.trim() : '';
+  if (!redirectUri) {
+    ui.alert(
+      'Get User Token',
+      'OAuth is not configured yet.\n\n' +
+      'The person who set up the BulkDM app needs to:\n' +
+      '1. Deploy this script as a Web app (Deploy > New deployment > Web app)\n' +
+      '2. Set SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, and SLACK_REDIRECT_URI in the script\n' +
+      '3. Add the same SLACK_REDIRECT_URI to the Slack app under OAuth & Permissions → Redirect URLs\n\n' +
+      'Then use Slack Tools → Get User Token (OAuth) again.',
+      ui.ButtonSet.OK
+    );
+    return;
+  }
+  const html = HtmlService.createHtmlOutput(
+    '<p style="font-family:sans-serif;">To get your <strong>User Token</strong> so messages are sent from your Slack account:</p>' +
+    '<ol style="font-family:sans-serif; text-align:left;">' +
+    '<li>Click the link below (opens in your browser)</li>' +
+    '<li>Click <strong>Allow</strong> to install BulkDM</li>' +
+    '<li>Copy the <strong>User Token</strong> shown on the next page</li>' +
+    '<li>Paste it in Extensions → Apps Script as <code>SLACK_BOT_TOKEN</code>, or paste in the sheet if you use a different setup</li>' +
+    '<li>Set TOKEN TYPE to <strong>User</strong> in row 4</li>' +
+    '</ol>' +
+    '<p><a href="' + redirectUri + '" target="_blank" style="font-size:14px;">Open Get User Token page</a></p>' +
+    '<p style="font-size:11px; color:#666;">If the link does not open, copy this URL: ' + redirectUri + '</p>'
+  )
+    .setWidth(420)
+    .setHeight(260);
+  ui.showModalDialog(html, 'Get User Token');
+}
+
+function getSlackOAuthUrl() {
+  var redirectUri = (typeof SLACK_REDIRECT_URI !== 'undefined' && SLACK_REDIRECT_URI) ? String(SLACK_REDIRECT_URI).trim() : '';
+  var clientId = (typeof SLACK_CLIENT_ID !== 'undefined' && SLACK_CLIENT_ID) ? String(SLACK_CLIENT_ID).trim() : '';
+  if (!redirectUri || !clientId) return null;
+  var scopes = (typeof SLACK_USER_SCOPES !== 'undefined' && SLACK_USER_SCOPES) ? SLACK_USER_SCOPES : 'chat:write,im:write,users:read,im:history';
+  return 'https://slack.com/oauth/v2/authorize?client_id=' + encodeURIComponent(clientId) +
+    '&user_scope=' + encodeURIComponent(scopes) + '&redirect_uri=' + encodeURIComponent(redirectUri);
+}
+
+function showConnectToSlackSidebar() {
+  var html = '<div id="content" style="font-family:sans-serif; padding:12px;">Loading...</div>' +
+    '<script>' +
+    'function onStatus(status) {' +
+    '  var el = document.getElementById("content");' +
+    '  if (!el) return;' +
+    '  if (status && status.connected) {' +
+    '    el.innerHTML = \'<p><strong>You are connected.</strong></p><p>Messages will send from your Slack account.</p>\' +' +
+    '      \'<p style="font-size:11px; margin-top:10px;">To get new permissions (e.g. email lookup): In Slack go to <strong>Settings &gt; Apps</strong>, find BulkDM, <strong>Remove</strong>. Then click Reconnect below.</p>\' +' +
+    '      \'<p><button id="reconnect">Reconnect</button></p>\';' +
+    '    var btn = document.getElementById("reconnect");' +
+    '    if (btn) btn.onclick = startConnect;' +
+    '    return;' +
+    '  }' +
+    '  el.innerHTML = \'<p>Connect once so BulkDM can send DMs from your Slack account.</p>\' +' +
+    '    \'<p><button id="connect">Connect to Slack</button></p>\' +' +
+    '    \'<p style="margin-top:12px; font-size:11px;">Or paste a token below:</p>\' +' +
+    '    \'<textarea id="token" rows="3" style="width:100%; margin:4px 0;"></textarea>\' +' +
+    '    \'<p><button id="save">Save token</button></p>\' +' +
+    '    \'<p id="msg" style="font-size:11px;"></p>\';' +
+    '  var c = document.getElementById("connect");' +
+    '  var s = document.getElementById("save");' +
+    '  if (c) c.onclick = startConnect;' +
+    '  if (s) s.onclick = savePasted;' +
+    '}' +
+    'function refreshStatus() {' +
+    '  google.script.run.withSuccessHandler(onStatus).getConnectionStatus();' +
+    '}' +
+    'function startConnect() {' +
+    '  google.script.run.withSuccessHandler(function(url) {' +
+    '    if (url) {' +
+    '      window.open(url, "slack_oauth", "width=600,height=700");' +
+    '      var msgEl = document.getElementById("msg");' +
+    '      if (msgEl) msgEl.textContent = "Complete the sign-in in the popup, then this panel will update.";' +
+    '      var poll = setInterval(function() {' +
+    '        google.script.run.withSuccessHandler(function(st) {' +
+    '          if (st && st.connected) { clearInterval(poll); onStatus(st); }' +
+    '        }).getConnectionStatus();' +
+    '      }, 2000);' +
+    '      setTimeout(function() { clearInterval(poll); }, 60000);' +
+    '    } else document.getElementById("content").innerHTML = "<p>OAuth not configured. Use Get User Token (OAuth) and paste the token here.</p>";' +
+    '  }).getSlackOAuthUrl();' +
+    '}' +
+    'function savePasted() {' +
+    '  var t = document.getElementById("token").value.trim();' +
+    '  if (!t) { document.getElementById("msg").textContent = "Enter a token."; return; }' +
+    '  document.getElementById("msg").textContent = "Saving...";' +
+    '  google.script.run.withSuccessHandler(function(r) {' +
+    '    if (r && r.ok) { refreshStatus(); document.getElementById("msg").textContent = "Saved."; }' +
+    '    else document.getElementById("msg").textContent = (r && r.error) ? r.error : "Failed to save.";' +
+    '  }).saveSlackToken(t);' +
+    '}' +
+    'window.addEventListener("message", function(e) {' +
+    '  if (e.data && e.data.type === "slack_token" && e.data.token) {' +
+    '    google.script.run.withSuccessHandler(function(r) { if (r && r.ok) refreshStatus(); }).saveSlackToken(e.data.token);' +
+    '  }' +
+    '});' +
+    'document.addEventListener("visibilitychange", function() { if (document.visibilityState === "visible") refreshStatus(); });' +
+    'google.script.run.withSuccessHandler(onStatus).getConnectionStatus();' +
+    '</script>';
+  SpreadsheetApp.getUi().showSidebar(HtmlService.createHtmlOutput(html).setTitle('Connect to Slack').setWidth(320));
+}
+
+/**
+ * Web app entry point for OAuth "Get User Token" flow.
+ * Deploy as Web app; set that URL as SLACK_REDIRECT_URI and in Slack app Redirect URLs.
+ */
+function doGet(e) {
+  const params = e && e.parameter ? e.parameter : {};
+  const code = params.code;
+  const redirectUri = (typeof SLACK_REDIRECT_URI !== 'undefined' && SLACK_REDIRECT_URI) ? String(SLACK_REDIRECT_URI).trim() : '';
+  const clientId = (typeof SLACK_CLIENT_ID !== 'undefined' && SLACK_CLIENT_ID) ? String(SLACK_CLIENT_ID).trim() : '';
+  const clientSecret = (typeof SLACK_CLIENT_SECRET !== 'undefined' && SLACK_CLIENT_SECRET) ? String(SLACK_CLIENT_SECRET).trim() : '';
+
+  if (!redirectUri || !clientId || !clientSecret) {
+    return HtmlService.createHtmlOutput(
+      '<body style="font-family:sans-serif; padding:20px;"><h2>BulkDM – Get User Token</h2>' +
+      '<p>OAuth is not configured. Set SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, and SLACK_REDIRECT_URI in the script.</p></body>'
+    ).setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+  }
+
+  if (code) {
+    return exchangeSlackOAuthCode(code, redirectUri, clientId, clientSecret);
+  }
+
+  const scopes = (typeof SLACK_USER_SCOPES !== 'undefined' && SLACK_USER_SCOPES) ? SLACK_USER_SCOPES : 'chat:write,im:write,users:read,im:history';
+  const addUrl = 'https://slack.com/oauth/v2/authorize?client_id=' + encodeURIComponent(clientId) +
+    '&user_scope=' + encodeURIComponent(scopes) + '&redirect_uri=' + encodeURIComponent(redirectUri);
+  return HtmlService.createHtmlOutput(
+    '<body style="font-family:sans-serif; padding:24px; max-width:480px;">' +
+    '<h2>BulkDM – Get User Token</h2>' +
+    '<p>Click below to authorize. You will get a User Token to paste into the sheet.</p>' +
+    '<p style="margin:24px 0;"><a href="' + addUrl + '" style="display:inline-block; background:#4A154B; color:#fff; padding:12px 24px; text-decoration:none; border-radius:4px;">Add to Slack</a></p></body>'
+  ).setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+function exchangeSlackOAuthCode(code, redirectUri, clientId, clientSecret) {
+  try {
+    const options = {
+      method: 'post',
+      contentType: 'application/x-www-form-urlencoded',
+      payload: 'client_id=' + encodeURIComponent(clientId) + '&client_secret=' + encodeURIComponent(clientSecret) +
+        '&code=' + encodeURIComponent(code) + '&redirect_uri=' + encodeURIComponent(redirectUri),
+      muteHttpExceptions: true
+    };
+    const response = UrlFetchApp.fetch('https://slack.com/api/oauth.v2.access', options);
+    const data = JSON.parse(response.getContentText() || '{}');
+    if (!data.ok) {
+      return HtmlService.createHtmlOutput(
+        '<body style="font-family:sans-serif; padding:20px;"><h2>Error</h2><p>' + (data.error || 'unknown') + '</p><p><a href="' + redirectUri + '">Try again</a></p></body>'
+      ).setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+    }
+    const userToken = (data.authed_user && data.authed_user.access_token) ? data.authed_user.access_token : '';
+    const escapedToken = userToken.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/</g, '\\u003c');
+    let body = '<body style="font-family:sans-serif; padding:24px;"><h2>BulkDM – Connected</h2>';
+    if (userToken) {
+      body += '<p>If the sheet showed "You are connected," you can close this window.</p>' +
+        '<p><strong>If the sheet did not update:</strong> Copy the token below. In the sheet open <strong>Slack Tools → Connect to Slack</strong>, paste into the box, and click <strong>Save token</strong>.</p>' +
+        '<p style="background:#f5f5f5; padding:12px; word-break:break-all;" id="tok">' + userToken + '</p>' +
+        '<p><button onclick="navigator.clipboard.writeText(document.getElementById(\'tok\').textContent); this.textContent=\'Copied!\';">Copy token</button></p>';
+      body += '<script>' +
+        '(function(){ var t=\'' + escapedToken + '\'; var p={type:\'slack_token\',token:t}; var n=0; function send(){ if(window.opener){ try{ window.opener.postMessage(p,\'*\'); }catch(e){} } n++; if(n<7) setTimeout(send,400); else setTimeout(function(){ window.close(); },600); } send(); })();' +
+        '</script>';
+    } else {
+      body += '<p>No user token in response. Ensure your Slack app has user scopes: chat:write, im:write, users:read, im:history.</p>';
+    }
+    body += '</body>';
+    return HtmlService.createHtmlOutput(body).setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+  } catch (err) {
+    return HtmlService.createHtmlOutput('<body style="font-family:sans-serif; padding:20px;"><h2>Error</h2><p>' + String(err) + '</p></body>').setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+  }
 }
 
 /**
@@ -226,27 +391,48 @@ function getTokenType() {
 
 /**
  * Gets the appropriate token based on token type configuration
- * Returns the token string or null if not set
+ * Prefers token stored via "Connect to Slack" (Document Properties); falls back to SLACK_BOT_TOKEN.
  */
 function getSlackToken() {
-  const tokenType = getTokenType();
-  
-  if (tokenType === 'User') {
-    // For User tokens, check if there's a USER_TOKEN constant or use the same token
-    // Note: User tokens start with xoxp-, Bot tokens start with xoxb-
-    // For now, we'll use the same SLACK_BOT_TOKEN variable but expect it to be a User token
-    // In a real implementation, you might want separate variables
-    if (SLACK_BOT_TOKEN === 'YOUR_SLACK_BOT_TOKEN') {
-      return null;
-    }
-    return SLACK_BOT_TOKEN;
-  } else {
-    // Bot token
-    if (SLACK_BOT_TOKEN === 'YOUR_SLACK_BOT_TOKEN') {
-      return null;
-    }
-    return SLACK_BOT_TOKEN;
+  const docProps = PropertiesService.getDocumentProperties();
+  const storedToken = docProps.getProperty(SLACK_TOKEN_PROPERTY);
+  if (storedToken && storedToken.trim().length > 0) {
+    return storedToken.trim();
   }
+  if (SLACK_BOT_TOKEN === 'YOUR_SLACK_BOT_TOKEN') {
+    return null;
+  }
+  return SLACK_BOT_TOKEN;
+}
+
+/**
+ * Saves the Slack token to Document Properties (used after Connect to Slack or "I've connected Slack").
+ * Sets TOKEN TYPE to User so messages send from their account.
+ */
+function saveSlackToken(token) {
+  if (!token || String(token).trim().length === 0) {
+    return { ok: false, error: 'Token is empty.' };
+  }
+  const t = String(token).trim();
+  PropertiesService.getDocumentProperties().setProperty(SLACK_TOKEN_PROPERTY, t);
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  if (sheet) {
+    try {
+      sheet.getRange(ROW_TOKEN_TYPE_VALUE, COLUMN_RECIPIENT).setValue('User');
+    } catch (e) {}
+  }
+  return { ok: true };
+}
+
+/**
+ * Returns connection status for the Connect to Slack sidebar.
+ */
+function getConnectionStatus() {
+  const token = getSlackToken();
+  if (!token) {
+    return { connected: false, message: 'Not connected' };
+  }
+  return { connected: true, message: 'Connected' };
 }
 
 /**
@@ -262,10 +448,10 @@ function sendAllMessages() {
   }
   
   // Check if token is set
-  if (SLACK_BOT_TOKEN === 'YOUR_SLACK_BOT_TOKEN') {
-    ui.alert('Setup Required', 
-      'Please update SLACK_BOT_TOKEN in the script with your Bot token.\n\n' +
-      'Go to Extensions > Apps Script and replace YOUR_SLACK_BOT_TOKEN', 
+  const token = getSlackToken();
+  if (!token) {
+    ui.alert('Connect to Slack',
+      'No Slack token found. Use Slack Tools → Connect to Slack, or set SLACK_BOT_TOKEN in Extensions → Apps Script.',
       ui.ButtonSet.OK);
     return;
   }
@@ -298,10 +484,63 @@ function sendAllMessages() {
     return;
   }
   
-  // Get all Slack users once (for efficiency)
-  const slackUsers = getAllSlackUsers();
-  if (!slackUsers) {
-    ui.alert('Error', `Failed to connect to Slack. Please check your ${tokenType} token.`, ui.ButtonSet.OK);
+  var recipientsWithMessage = [];
+  for (var r = 0; r < values.length; r++) {
+    var rec = values[r][COLUMN_RECIPIENT - 1];
+    var msg = values[r][COLUMN_MESSAGE - 1];
+    if (rec && msg) recipientsWithMessage.push(rec);
+
+    sheet.getRange(ROW_DATA_START + r, COLUMN_STATUS).setValue('⏳ Finding recipients...');
+    SpreadsheetApp.flush();
+  }
+  
+  var allLookLikeEmail = recipientsWithMessage.length > 0 && recipientsWithMessage.every(function(r) { return looksLikeEmail(r); });
+  var slackUsers = null;
+  var lookupMap = null;
+  var emailToIdMap = {};
+  
+  if (allLookLikeEmail) {
+    try {
+      SpreadsheetApp.getActiveSpreadsheet().toast('Looking up recipients by email...', 'BulkDM', 45);
+    } catch (e) {}
+    var seen = {};
+    for (var e = 0; e < recipientsWithMessage.length; e++) {
+      var em = String(recipientsWithMessage[e]).trim().toLowerCase();
+      if (seen[em]) continue;
+      seen[em] = true;
+      var uid = lookupSlackUserByEmail(em);
+      if (uid) emailToIdMap[em] = uid;
+      Utilities.sleep(1100);
+    }
+  } else {
+    try {
+      SpreadsheetApp.getActiveSpreadsheet().toast('Finding recipients...', 'BulkDM', 45);
+    } catch (e) {}
+    var normalizedRecipients = [];
+    for (var n = 0; n < recipientsWithMessage.length; n++) {
+      var r = recipientsWithMessage[n];
+      if (r && String(r).trim()) normalizedRecipients.push(String(r).trim());
+    }
+    var cachedResult = getCachedUsersAndMap();
+    if (cachedResult.users && cachedResult.users.length > 0 && cachedResult.lookupMap) {
+      if (allRecipientsMatched(normalizedRecipients, cachedResult.users, cachedResult.lookupMap)) {
+        slackUsers = cachedResult.users;
+        lookupMap = cachedResult.lookupMap;
+      }
+    }
+    if (!slackUsers) {
+      var result = getAllSlackUsersUntilMatched(recipientsWithMessage);
+      if (!result) {
+        ui.alert('Error', 'Failed to connect to Slack. Please check your ' + tokenType + ' token.', ui.ButtonSet.OK);
+        return;
+      }
+      slackUsers = result.users;
+      lookupMap = result.lookupMap;
+    }
+  }
+  
+  if (allLookLikeEmail && Object.keys(emailToIdMap).length === 0 && recipientsWithMessage.length > 0) {
+    ui.alert('Error', 'Could not find any recipients by email. Add users:read.email to your Slack app scopes and re-connect (Connect to Slack), or use full names instead of emails.', ui.ButtonSet.OK);
     return;
   }
   
@@ -324,8 +563,13 @@ function sendAllMessages() {
     sheet.getRange(row, COLUMN_STATUS).setValue('⏳ Sending...');
     SpreadsheetApp.flush(); // Force update
     
-    // Find user
-    const userId = findSlackUser(recipient, slackUsers);
+    // Find user: by email lookup (if all recipients were emails) or by full-list lookup
+    var userId = null;
+    if (allLookLikeEmail) {
+      userId = emailToIdMap[recipient.toString().trim().toLowerCase()] || null;
+    } else {
+      userId = findSlackUserFast(recipient, slackUsers, lookupMap);
+    }
     
     if (!userId) {
       sheet.getRange(row, COLUMN_STATUS).setValue('❌ User not found');
@@ -340,7 +584,8 @@ function sendAllMessages() {
       sheet.getRange(row, COLUMN_STATUS).setValue('✅ Sent');
       successCount++;
     } else {
-      sheet.getRange(row, COLUMN_STATUS).setValue(`❌ Error: ${result.error}`);
+      const friendlyError = getSlackErrorMessage(result.error);
+      sheet.getRange(row, COLUMN_STATUS).setValue(`❌ Error: ${friendlyError}`);
       errorCount++;
     }
     
@@ -374,10 +619,8 @@ function readAllResponses() {
   // Check if token is set
   const token = getSlackToken();
   if (!token) {
-    const tokenType = getTokenType();
-    ui.alert('Setup Required', 
-      `Please update SLACK_BOT_TOKEN in the script with your ${tokenType} token.\n\n` +
-      'Go to Extensions > Apps Script and replace YOUR_SLACK_BOT_TOKEN', 
+    ui.alert('Connect to Slack',
+      'No Slack token found. Use Slack Tools → Connect to Slack, or set SLACK_BOT_TOKEN in Extensions → Apps Script.',
       ui.ButtonSet.OK);
     return;
   }
@@ -391,7 +634,10 @@ function readAllResponses() {
   }
   const senderUserId = senderInfo.user_id;
   
-  // Get all Slack users for matching
+  // Get all Slack users for matching (cached when possible)
+  try {
+    SpreadsheetApp.getActiveSpreadsheet().toast('Loading workspace members...', 'BulkDM', 15);
+  } catch (e) {}
   const slackUsers = getAllSlackUsers();
   if (!slackUsers) {
     const tokenType = getTokenType();
@@ -532,34 +778,36 @@ function readAllResponses() {
 }
 
 /**
- * Test Slack connection
+ * Test Slack connection (quick check via auth.test; does not load full user list)
  */
 function testSlackConnection() {
   const ui = SpreadsheetApp.getUi();
   
-  if (SLACK_BOT_TOKEN === 'YOUR_SLACK_BOT_TOKEN') {
-    ui.alert('Setup Required', 'Please set your Bot token first.', ui.ButtonSet.OK);
+  if (!getSlackToken()) {
+    ui.alert('Connect to Slack',
+      'No Slack token found. Use Slack Tools → Connect to Slack, or set SLACK_BOT_TOKEN in Extensions → Apps Script.',
+      ui.ButtonSet.OK);
     return;
   }
   
-  ui.alert('Testing...', 'Checking Slack connection...', ui.ButtonSet.OK);
-  
-  const users = getAllSlackUsers();
-  if (users) {
+  const info = getBotInfo();
+  if (info) {
+    const tokenType = getTokenType();
     ui.alert(
-      '✅ Connection Successful!',
-      `Connected to Slack!\n\nFound ${users.length} users in your workspace.\n\n` +
-      `Note: Messages will be sent FROM THE BOT, not from individual users.`,
+      'Connection successful',
+      'Your Slack token is valid.\n\n' +
+      'Messages will be sent from your ' + (tokenType === 'User' ? 'Slack account' : 'bot') + '.\n\n' +
+      'The first time you use Send Messages or Read Responses, the workspace member list will load (may take a minute for large workspaces); after that it is cached for 1 hour.',
       ui.ButtonSet.OK
     );
   } else {
     ui.alert(
-      '❌ Connection Failed',
+      'Connection failed',
       'Could not connect to Slack. Please check:\n\n' +
-      '1. Your Bot token is correct (should start with xoxb-)\n' +
-      '2. Bot has required scopes (chat:write, im:write, users:read)\n' +
-      '3. Bot is installed in your workspace\n' +
-      '4. Token is not expired',
+      '1. Your token is correct (User: xoxp-... or Bot: xoxb-...)\n' +
+      '2. Required scopes: chat:write, im:write, users:read, im:history\n' +
+      '3. App is installed in your workspace\n' +
+      '4. Token is not revoked or expired',
       ui.ButtonSet.OK
     );
   }
@@ -570,7 +818,31 @@ function testSlackConnection() {
 // ============================================
 
 /**
- * Get all users from Slack workspace
+ * Returns a user-friendly message for known Slack API errors (e.g. when sending DMs).
+ * Falls back to the raw error if unknown.
+ */
+function getSlackErrorMessage(slackError) {
+  if (!slackError) return slackError;
+  const code = slackError.toString().trim();
+  const known = {
+    'messages_tab_disabled': 'Recipient has DMs disabled or restricted. Ask them to allow messages from apps (Settings → Privacy) or skip this recipient.',
+    'channel_not_found': 'Channel or user not found.',
+    'user_not_found': 'User not found.',
+    'not_in_channel': 'Bot is not in the channel.',
+    'invalid_auth': 'Invalid token. Check your Slack token.',
+    'account_inactive': 'Recipient\'s account is deactivated.',
+    'user_is_restricted': 'Recipient is a restricted user (guest); some actions are not allowed.',
+    'cant_dm_bot': 'Cannot open a DM with a bot user.',
+    'ratelimited': 'Rate limited by Slack. Wait a minute and try again.'
+  };
+  return known[code] || code;
+}
+
+/**
+ * Get all users from Slack workspace (with pagination)
+ * Slack's users.list returns max 200 per request; we follow cursor to get all users.
+ * Handles 429 rate limit by waiting per Retry-After and retrying.
+ * Results are cached for SLACK_USERS_CACHE_TTL seconds to avoid repeated API calls.
  */
 function getAllSlackUsers() {
   try {
@@ -579,26 +851,247 @@ function getAllSlackUsers() {
       return null;
     }
     
-    const url = 'https://slack.com/api/users.list';
-    const options = {
-      method: 'get',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json'
-      }
-    };
-    
-    const response = UrlFetchApp.fetch(url, options);
-    const data = JSON.parse(response.getContentText());
-    
-    if (data.ok) {
-      return data.members.filter(user => !user.deleted && !user.is_bot);
-    } else {
-      Logger.log('Slack API Error: ' + data.error);
-      return null;
+    const cached = getCachedSlackUsers();
+    if (cached && cached.length >= 0) {
+      return cached;
     }
+    
+    const allMembers = [];
+    let cursor = '';
+    
+    do {
+      const url = 'https://slack.com/api/users.list';
+      const params = {
+        limit: 200,
+        cursor: cursor || undefined
+      };
+      const queryString = Object.keys(params)
+        .filter(k => params[k] !== undefined && params[k] !== '')
+        .map(k => encodeURIComponent(k) + '=' + encodeURIComponent(params[k]))
+        .join('&');
+      
+      const options = {
+        method: 'get',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        muteHttpExceptions: true,
+        timeout: 15
+      };
+      
+      const fullUrl = queryString ? url + '?' + queryString : url;
+      let response = UrlFetchApp.fetch(fullUrl, options);
+      const responseCode = response.getResponseCode();
+      
+      // Handle rate limit: wait and retry same request
+      if (responseCode === 429) {
+        const retryAfter = response.getHeaders()['Retry-After'] || response.getHeaders()['retry-after'];
+        const waitSeconds = retryAfter ? Math.max(2, parseInt(retryAfter, 10)) : 3;
+        Logger.log('Slack rate limited (429), waiting ' + waitSeconds + 's before retry');
+        try {
+          SpreadsheetApp.getActiveSpreadsheet().toast('Slack rate limit – waiting ' + waitSeconds + 's...', 'BulkDM', 5);
+        } catch (e) {}
+        Utilities.sleep(waitSeconds * 1000);
+        response = UrlFetchApp.fetch(fullUrl, options);
+        if (response.getResponseCode() === 429) {
+          Logger.log('Slack API Error: still rate limited after retry');
+          return null;
+        }
+      }
+      
+      const data = JSON.parse(response.getContentText());
+      
+      if (!data.ok) {
+        Logger.log('Slack API Error: ' + data.error);
+        return null;
+      }
+      
+      if (data.members && data.members.length > 0) {
+        allMembers.push.apply(allMembers, data.members);
+      }
+      
+      if (MAX_USERS_TO_FETCH > 0 && allMembers.length >= MAX_USERS_TO_FETCH) {
+        break;
+      }
+      
+      cursor = (data.response_metadata && data.response_metadata.next_cursor) ? data.response_metadata.next_cursor : '';
+      
+      if (cursor) {
+        Utilities.sleep(1200);
+      }
+    } while (cursor);
+    
+    const filtered = allMembers.filter(user => !user.deleted && !user.is_bot);
+    setCachedSlackUsers(filtered);
+    return filtered;
   } catch (error) {
     Logger.log('Error fetching users: ' + error);
+    return null;
+  }
+}
+
+function getCachedSlackUsers() {
+  try {
+    const cache = CacheService.getDocumentCache();
+    const raw = cache.get(SLACK_USERS_CACHE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * Returns cached user list and a lookup map (normalized name/email -> userId) for fast lookups.
+ * Map is built from the list each time so the cache stays a single list updated with every API batch.
+ */
+function getCachedUsersAndMap() {
+  var list = getCachedSlackUsers();
+  if (!list || list.length === 0) return { users: null, lookupMap: null };
+  return { users: list, lookupMap: buildUserLookupMap(list) };
+}
+
+function toMinimalUser(u) {
+  return {
+    id: u.id,
+    name: u.name || '',
+    profile: {
+      email: (u.profile && u.profile.email) || '',
+      display_name: (u.profile && u.profile.display_name) || '',
+      real_name: (u.profile && u.profile.real_name) || ''
+    }
+  };
+}
+
+/**
+ * Appends a batch of users (from an API page) to the cached list. Call after each users.list page.
+ * Keeps cache as a single list for easy incremental updates; lookups use buildUserLookupMap(list).
+ */
+function updateCacheWithBatch(newUserObjects) {
+  if (!newUserObjects || newUserObjects.length === 0) return;
+  var existing = getCachedSlackUsers() || [];
+  var minimal = [];
+  for (var i = 0; i < newUserObjects.length; i++) {
+    minimal.push(toMinimalUser(newUserObjects[i]));
+  }
+  var merged = existing.concat(minimal);
+  setCachedSlackUsers(merged);
+}
+
+function setCachedSlackUsers(users) {
+  if (!users || users.length === 0) return;
+  try {
+    const minimal = users.map(function(u) {
+      return toMinimalUser(u);
+    });
+    const cache = CacheService.getDocumentCache();
+    const ttl = Math.min(SLACK_USERS_CACHE_TTL, 21600);
+    const json = JSON.stringify(minimal);
+    if (json.length > 100000) return;
+    cache.put(SLACK_USERS_CACHE_KEY, json, ttl);
+  } catch (e) {
+    Logger.log('Could not cache users: ' + e);
+  }
+}
+
+/**
+ * Returns true if every recipient has a match in the current user list / lookup map.
+ */
+function allRecipientsMatched(recipients, slackUsers, lookupMap) {
+  if (!recipients || recipients.length === 0) return true;
+  for (var i = 0; i < recipients.length; i++) {
+    var r = recipients[i];
+    if (!r) continue;
+    if (findSlackUserFast(r, slackUsers, lookupMap)) continue;
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Fetches users page-by-page (200 per page) and stops as soon as all recipients are matched.
+ * Returns { users: array, lookupMap: object } or null. Caches only when the full list was fetched.
+ * Checks the document cache first; if cache has all recipients matched, returns immediately without API calls.
+ */
+function getAllSlackUsersUntilMatched(recipientList) {
+  var token = getSlackToken();
+  if (!token) return null;
+  var normalizedRecipients = [];
+  for (var i = 0; i < recipientList.length; i++) {
+    var r = recipientList[i];
+    if (r && String(r).trim()) normalizedRecipients.push(String(r).trim());
+  }
+  if (normalizedRecipients.length === 0) return { users: [], lookupMap: {} };
+
+  var cachedResult = getCachedUsersAndMap();
+  if (cachedResult.users && cachedResult.users.length > 0 && cachedResult.lookupMap) {
+    if (allRecipientsMatched(normalizedRecipients, cachedResult.users, cachedResult.lookupMap)) {
+      return { users: cachedResult.users, lookupMap: cachedResult.lookupMap };
+    }
+  }
+
+  try {
+    var allMembers = [];
+    var cursor = '';
+    var pageCount = 0;
+
+    do {
+      pageCount++;
+      var url = 'https://slack.com/api/users.list';
+      var params = { limit: 200 };
+      if (cursor) params.cursor = cursor;
+      var queryString = Object.keys(params)
+        .filter(function(k) { return params[k] !== undefined && params[k] !== ''; })
+        .map(function(k) { return encodeURIComponent(k) + '=' + encodeURIComponent(params[k]); })
+        .join('&');
+      var options = {
+        method: 'get',
+        headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+        muteHttpExceptions: true,
+        timeout: 15
+      };
+      var fullUrl = queryString ? url + '?' + queryString : url;
+      var response = UrlFetchApp.fetch(fullUrl, options);
+      var responseCode = response.getResponseCode();
+
+      if (responseCode === 429) {
+        var retryAfter = response.getHeaders()['Retry-After'] || response.getHeaders()['retry-after'];
+        var waitSeconds = retryAfter ? Math.max(2, parseInt(retryAfter, 10)) : 3;
+        try { SpreadsheetApp.getActiveSpreadsheet().toast('Slack rate limit – waiting ' + waitSeconds + 's...', 'BulkDM', 5); } catch (e) {}
+        Utilities.sleep(waitSeconds * 1000);
+        response = UrlFetchApp.fetch(fullUrl, options);
+        if (response.getResponseCode() === 429) return null;
+      }
+
+      var data = JSON.parse(response.getContentText());
+      if (!data.ok) {
+        Logger.log('Slack API Error: ' + data.error);
+        return null;
+      }
+
+      if (data.members && data.members.length > 0) {
+        var pageFiltered = data.members.filter(function(u) { return !u.deleted && !u.is_bot; });
+        allMembers.push.apply(allMembers, data.members);
+        updateCacheWithBatch(pageFiltered);
+      }
+
+      var filtered = allMembers.filter(function(u) { return !u.deleted && !u.is_bot; });
+      var lookupMap = buildUserLookupMap(filtered);
+      if (allRecipientsMatched(normalizedRecipients, filtered, lookupMap)) {
+        try { SpreadsheetApp.getActiveSpreadsheet().toast('All recipients found after ' + pageCount + ' page(s).', 'BulkDM', 3); } catch (e) {}
+        return { users: filtered, lookupMap: lookupMap };
+      }
+
+      cursor = (data.response_metadata && data.response_metadata.next_cursor) ? data.response_metadata.next_cursor : '';
+      if (cursor) Utilities.sleep(1200);
+    } while (cursor);
+
+    var filteredFinal = allMembers.filter(function(u) { return !u.deleted && !u.is_bot; });
+    setCachedSlackUsers(filteredFinal);
+    return { users: filteredFinal, lookupMap: buildUserLookupMap(filteredFinal) };
+  } catch (e) {
+    Logger.log('getAllSlackUsersUntilMatched: ' + e);
     return null;
   }
 }
@@ -613,35 +1106,26 @@ function findSlackUser(recipient, slackUsers) {
   const searchTerm = recipient.toString().trim().toLowerCase();
   
   for (const user of slackUsers) {
-    // Match by email (most reliable)
     if (user.profile && user.profile.email) {
       if (user.profile.email.toLowerCase() === searchTerm) {
         return user.id;
       }
     }
-    
-    // Match by display name
     if (user.profile && user.profile.display_name) {
       if (user.profile.display_name.toLowerCase() === searchTerm) {
         return user.id;
       }
     }
-    
-    // Match by real name
     if (user.profile && user.profile.real_name) {
       if (user.profile.real_name.toLowerCase() === searchTerm) {
         return user.id;
       }
     }
-    
-    // Match by username (without @)
     if (user.name) {
       if (user.name.toLowerCase() === searchTerm.replace('@', '')) {
         return user.id;
       }
     }
-    
-    // Partial match on real name (e.g., "John" matches "John Smith")
     if (user.profile && user.profile.real_name) {
       const realName = user.profile.real_name.toLowerCase();
       if (realName.includes(searchTerm) || searchTerm.includes(realName)) {
@@ -651,6 +1135,97 @@ function findSlackUser(recipient, slackUsers) {
   }
   
   return null;
+}
+
+/**
+ * Build a single lookup map from all users for O(1) recipient resolution.
+ * Keys: normalized email, display_name, real_name, username, and each word in real_name.
+ */
+function buildUserLookupMap(slackUsers) {
+  var map = {};
+  if (!slackUsers) return map;
+  for (var u = 0; u < slackUsers.length; u++) {
+    var user = slackUsers[u];
+    var id = user.id;
+    var add = function(key) {
+      if (key && key.length > 0 && map[key] === undefined) {
+        map[key] = id;
+      }
+    };
+    var email = user.profile && user.profile.email ? user.profile.email.toLowerCase().trim() : '';
+    var displayName = user.profile && user.profile.display_name ? user.profile.display_name.toLowerCase().trim() : '';
+    var realName = user.profile && user.profile.real_name ? user.profile.real_name.toLowerCase().trim() : '';
+    var name = user.name ? user.name.toLowerCase().replace('@', '').trim() : '';
+    add(email);
+    add(displayName);
+    add(realName);
+    add(name);
+    if (realName) {
+      var words = realName.split(/\s+/);
+      for (var w = 0; w < words.length; w++) {
+        add(words[w]);
+      }
+    }
+  }
+  return map;
+}
+
+/**
+ * Fast lookup: use prebuilt map for exact match, then fall back to partial match only if needed.
+ */
+function findSlackUserFast(recipient, slackUsers, lookupMap) {
+  if (!recipient || !slackUsers) return null;
+  var searchTerm = recipient.toString().trim().toLowerCase();
+  if (!searchTerm) return null;
+  var withoutAt = searchTerm.replace('@', '');
+  if (lookupMap[searchTerm]) return lookupMap[searchTerm];
+  if (lookupMap[withoutAt]) return lookupMap[withoutAt];
+  for (var i = 0; i < slackUsers.length; i++) {
+    var user = slackUsers[i];
+    if (user.profile && user.profile.real_name) {
+      var realName = user.profile.real_name.toLowerCase();
+      if (realName.indexOf(searchTerm) !== -1 || searchTerm.indexOf(realName) !== -1) {
+        return user.id;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Look up a single Slack user by email (no full user list needed).
+ * Requires scope users:read.email. Returns user id or null.
+ */
+function lookupSlackUserByEmail(email) {
+  if (!email || String(email).indexOf('@') === -1) return null;
+  try {
+    var token = getSlackToken();
+    if (!token) return null;
+    var url = 'https://slack.com/api/users.lookupByEmail?email=' + encodeURIComponent(String(email).trim());
+    var options = {
+      method: 'get',
+      headers: {
+        'Authorization': 'Bearer ' + token,
+        'Content-Type': 'application/json'
+      },
+      muteHttpExceptions: true,
+      timeout: 10
+    };
+    var response = UrlFetchApp.fetch(url, options);
+    var data = JSON.parse(response.getContentText() || '{}');
+    if (data.ok && data.user && data.user.id) {
+      return data.user.deleted ? null : data.user.id;
+    }
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function looksLikeEmail(str) {
+  if (!str || typeof str !== 'string') return false;
+  var s = str.trim();
+  return s.indexOf('@') !== -1 && /^\S+@\S+\.\S+$/.test(s);
 }
 
 /**
@@ -819,15 +1394,7 @@ function sendSlackDM(userId, message) {
     
     const channelId = imOpenData.channel.id;
     
-    // Send the message
-    const token = getSlackToken();
-    if (!token) {
-      return {
-        success: false,
-        error: 'Token not configured'
-      };
-    }
-    
+    // Send the message (reuse token from above)
     const tokenType = getTokenType();
     const chatUrl = 'https://slack.com/api/chat.postMessage';
     const chatPayload = {
