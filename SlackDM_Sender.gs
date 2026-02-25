@@ -1,19 +1,39 @@
 /**
- * BULKDM – Setup, connect, use
+ * BULKDM – Send Slack DMs from a Google Sheet and read replies
  *
- * 1. SETUP
- *    • Open your Google Sheet → Extensions → Apps Script. Paste this entire file (replace any existing code). Save.
- *    • In the sheet: Row 2 = tab name where your data lives. Row 4 = "Bot" or "User". Row 5 = headers. Row 6+ = Recipient, Message, Status, Response, Slack ID.
- *    • Refresh the sheet. You should see menu "Slack Tools". If not: in Apps Script pick "onOpen" in the dropdown → Run.
+ * ========== HOW TO USE (most users – you have a copy of the sheet) ==========
  *
- * 2. CONNECT TO SLACK
- *    • Bot: Go to api.slack.com/apps → your app → OAuth & Permissions. Add Bot Token Scopes: chat:write, im:write, users:read, im:read, im:history (im:read/im:history needed for Read Responses). Copy "Bot User OAuth Token" (xoxb-...). Paste it in CONFIG below for SLACK_BOT_TOKEN.
- *    • User (send as yourself): Same app → add User Token Scopes: chat:write, im:write, users:read, users:read.email, im:read, im:history. Use "Connect to Slack" in Slack Tools, or paste a user token (xoxp-...) into SLACK_BOT_TOKEN. Set Row 4 to "User".
+ * 1. Open your copy of the BulkDM Google Sheet.
+ *    When the sheet loads, it automatically creates the layout: headers, columns, and configuration rows.
+ *    You don’t need to type anything in the config area unless you use multiple tabs (see step 2).
  *
- * 3. USE
- *    • Slack Tools → Send Messages: sends DMs from the sheet (from Bot or from you if User).
- *    • Slack Tools → Read Responses: pulls replies into the Response column.
- *    • Slack Tools → Test Connection: checks token. Setup Headers: resets sheet labels/format.
+ * 2. Add your data (the only required input):
+ *    From row 6 down, add one row per recipient.
+ *    • Column A (Recipient Name): who to message – full name or email.
+ *    • Column B (Message): the message to send.
+ *    Columns C–F (Status, Response, Slack ID, Last Sent Timestamp) are filled in automatically; leave them blank.
+ *
+ * 3. Connect to Slack:
+ *    Click Slack Tools → Connect to Slack (or Get User Token if you want to send as yourself).
+ *    Follow the link, approve the app, then paste the token if prompted (or it may be saved automatically).
+ *    Token type (Bot vs User) is set automatically when you connect – you don’t choose it manually.
+ *
+ * 4. Send messages:
+ *    Click Slack Tools → Send Messages. Confirm when asked. The tool sends each row’s message and updates Status and Slack ID.
+ *
+ * 5. Read replies:
+ *    Click Slack Tools → Read Responses. Replies appear in the Response column (only messages the recipient sent after your BulkDM message).
+ *
+ * 6. Other:
+ *    Slack Tools → Test Connection: check your Slack connection. Slack Tools → Setup Headers: restore the layout if needed.
+ *
+ * ========== IF YOU ARE SETTING UP THE SHEET FROM SCRATCH OR OPENING APPS SCRIPT ==========
+ *
+ * • Open the sheet → Extensions → Apps Script. Paste this entire file (replace any existing code). Save.
+ * • In the script, find the CONFIG section (near the top). Set SLACK_BOT_TOKEN to your Slack Bot User OAuth Token (xoxb-...) if you use a Bot; for User tokens you can leave it and use Connect to Slack from the sheet instead.
+ * • Slack app scopes (api.slack.com → your app → OAuth & Permissions):
+ *   Bot: chat:write, im:write, users:read, im:read, im:history. User: chat:write, im:write, users:read, users:read.email, im:read, im:history. Then use Connect to Slack in the sheet for User.
+ * • Refresh the sheet. You should see Slack Tools. If not, in Apps Script choose "onOpen" and click Run once.
  */
 const SLACK_BOT_TOKEN = 'YOUR_SLACK_BOT_TOKEN';
 const SLACK_CLIENT_ID = '3895842157.10360289984709';
@@ -36,6 +56,7 @@ const COLUMN_MESSAGE = 2;   // Column B
 const COLUMN_STATUS = 3;   // Column C
 const COLUMN_RESPONSE = 4;  // Column D - Recipient responses
 const COLUMN_SLACK_ID = 5;  // Column E - Slack user ID (filled on first successful send)
+const COLUMN_LAST_SENT_TS = 6; // Column F - Timestamp of our last sent message (Read Responses only shows recipient messages after this, excluding the BulkDM message itself)
 
 // Configuration row positions
 const ROW_TAB_NAME_LABEL = 1;      // Row 1: "TAB NAME:"
@@ -249,65 +270,72 @@ function exchangeSlackOAuthCode(code, redirectUri, clientId, clientSecret) {
 }
 
 /**
- * Sets up configuration section and column headers in the sheet
+ * Sets up configuration section and column headers in the sheet.
+ * Called automatically when the sheet loads (onOpen). Layout and config rows are auto-created.
  */
 function setupHeaders() {
   const sheet = SpreadsheetApp.getActiveSheet();
-  
-  // Set up TAB NAME configuration section
+
+  // Data tab: auto-filled with current sheet name; user only changes if data lives in another tab
   const tabNameLabel = sheet.getRange(ROW_TAB_NAME_LABEL, COLUMN_RECIPIENT).getValue();
   if (!tabNameLabel || tabNameLabel.toString().trim() !== 'TAB NAME:') {
     sheet.getRange(ROW_TAB_NAME_LABEL, COLUMN_RECIPIENT).setValue('TAB NAME:');
     sheet.getRange(ROW_TAB_NAME_LABEL, COLUMN_RECIPIENT).setFontWeight('bold');
-    
-    // Set default tab name to current sheet if empty
+
     const currentTabName = sheet.getRange(ROW_TAB_NAME_VALUE, COLUMN_RECIPIENT).getValue();
     if (!currentTabName || currentTabName.toString().trim() === '') {
       sheet.getRange(ROW_TAB_NAME_VALUE, COLUMN_RECIPIENT).setValue(sheet.getName());
     }
-    
-    // Format the input cell
+
     const inputCell = sheet.getRange(ROW_TAB_NAME_VALUE, COLUMN_RECIPIENT);
-    inputCell.setBackground('#fff9c4'); // Light yellow background
-    inputCell.setNote('Enter the name of the tab where your data lives. This tab will be used for all operations.');
+    inputCell.setBackground('#e8eaed');
+    inputCell.setNote('Auto-filled with this tab. Change only if your recipient data is in a different tab.');
   }
-  
-  // Set up TOKEN TYPE configuration section
+
+  // Token type: set automatically from connected token (Bot vs User); display-only
   const tokenTypeLabel = sheet.getRange(ROW_TOKEN_TYPE_LABEL, COLUMN_RECIPIENT).getValue();
   if (!tokenTypeLabel || tokenTypeLabel.toString().trim() !== 'TOKEN TYPE:') {
     sheet.getRange(ROW_TOKEN_TYPE_LABEL, COLUMN_RECIPIENT).setValue('TOKEN TYPE:');
     sheet.getRange(ROW_TOKEN_TYPE_LABEL, COLUMN_RECIPIENT).setFontWeight('bold');
-    
-    // Set default to Bot if empty
-    const currentTokenType = sheet.getRange(ROW_TOKEN_TYPE_VALUE, COLUMN_RECIPIENT).getValue();
-    if (!currentTokenType || currentTokenType.toString().trim() === '') {
-      sheet.getRange(ROW_TOKEN_TYPE_VALUE, COLUMN_RECIPIENT).setValue('Bot');
-    }
-    
-    // Format the input cell with data validation
+
     const tokenTypeCell = sheet.getRange(ROW_TOKEN_TYPE_VALUE, COLUMN_RECIPIENT);
-    tokenTypeCell.setBackground('#fff9c4'); // Light yellow background
-    tokenTypeCell.setNote('Enter "Bot" to send from bot account, or "User" to send from your personal Slack account. See setup guide for User token instructions.');
-    
-    // Create data validation for Bot/User
-    const rule = SpreadsheetApp.newDataValidation()
-      .requireValueInList(['Bot', 'User'], true)
-      .setAllowInvalid(false)
-      .build();
-    tokenTypeCell.setDataValidation(rule);
+    tokenTypeCell.setBackground('#e8eaed');
+    tokenTypeCell.setFontColor('#5f6368');
+    tokenTypeCell.setNote('Set automatically when you connect to Slack. Bot = messages from the app; User = messages from your Slack account.');
+    // Sync value from current token (xoxp = User, xoxb = Bot)
+    const token = getSlackToken();
+    if (token && token.length > 0) {
+      const tokenType = token.indexOf('xoxp-') === 0 ? 'User' : 'Bot';
+      tokenTypeCell.setValue(tokenType);
+    } else {
+      if (!tokenTypeCell.getValue() || tokenTypeCell.getValue().toString().trim() === '') {
+        tokenTypeCell.setValue('Bot');
+      }
+    }
+  } else {
+    // Already have label; still sync token type from token when we have one and keep display-only formatting
+    const token = getSlackToken();
+    if (token && token.length > 0) {
+      const tokenType = token.indexOf('xoxp-') === 0 ? 'User' : 'Bot';
+      sheet.getRange(ROW_TOKEN_TYPE_VALUE, COLUMN_RECIPIENT).setValue(tokenType);
+    }
+    const tokenTypeCell = sheet.getRange(ROW_TOKEN_TYPE_VALUE, COLUMN_RECIPIENT);
+    tokenTypeCell.setBackground('#e8eaed');
+    tokenTypeCell.setFontColor('#5f6368');
+    tokenTypeCell.setNote('Set automatically when you connect to Slack. Bot = messages from the app; User = messages from your Slack account.');
+    try { tokenTypeCell.clearDataValidations(); } catch (e) {} // Remove dropdown so it stays display-only
   }
-  
-  // Check if headers already exist (support both 4- and 5-column layouts)
-  const headerRow = sheet.getRange(ROW_HEADERS, 1, 1, 5).getValues()[0];
+  const headerRow = sheet.getRange(ROW_HEADERS, 1, 1, 6).getValues()[0];
   const hasHeaders = headerRow[0] && headerRow[0].toString().trim().length > 0;
 
   if (!hasHeaders) {
-    // Set up headers (including Slack ID column)
+    // Set up headers (including Slack ID and Last Sent Timestamp)
     sheet.getRange(ROW_HEADERS, COLUMN_RECIPIENT).setValue('Recipient Name');
     sheet.getRange(ROW_HEADERS, COLUMN_MESSAGE).setValue('Message');
     sheet.getRange(ROW_HEADERS, COLUMN_STATUS).setValue('Status');
     sheet.getRange(ROW_HEADERS, COLUMN_RESPONSE).setValue('Response');
     sheet.getRange(ROW_HEADERS, COLUMN_SLACK_ID).setValue('Slack ID');
+    sheet.getRange(ROW_HEADERS, COLUMN_LAST_SENT_TS).setValue('Last Sent Timestamp');
 
     // Format header row (bold, background color) for user-input columns A–D
     const headerRange = sheet.getRange(ROW_HEADERS, 1, ROW_HEADERS, 4);
@@ -322,8 +350,17 @@ function setupHeaders() {
     slackIdHeader.setFontColor('#5f6368');
     slackIdHeader.setNote('Filled automatically when a message is sent. Leave blank—you don\'t need to enter anything here.');
 
-    // Light gray background on Slack ID data cells (column E) to indicate no input needed
+    // Last Sent Timestamp column: when we sent the BulkDM message (Read Responses only shows replies after it, excluding that message)
+    const lastSentTsHeader = sheet.getRange(ROW_HEADERS, COLUMN_LAST_SENT_TS);
+    lastSentTsHeader.setFontWeight('bold');
+    lastSentTsHeader.setBackground('#e8eaed');
+    lastSentTsHeader.setFontColor('#5f6368');
+    lastSentTsHeader.setNote('Filled when you send. Read Responses only shows messages the recipient sent after this time (excluding the BulkDM message itself).');
+    lastSentTsHeader.setNumberFormat('@'); // Keep as text so precision is preserved for filtering
+
+    // Light gray background on Slack ID and Last Sent Timestamp data cells
     sheet.getRange(ROW_DATA_START, COLUMN_SLACK_ID, ROW_DATA_START + 199, COLUMN_SLACK_ID).setBackground('#f1f3f4');
+    sheet.getRange(ROW_DATA_START, COLUMN_LAST_SENT_TS, ROW_DATA_START + 199, COLUMN_LAST_SENT_TS).setBackground('#f1f3f4').setNumberFormat('@');
 
     // Set column widths for better readability
     sheet.setColumnWidth(COLUMN_RECIPIENT, 200); // Recipient Name
@@ -331,19 +368,34 @@ function setupHeaders() {
     sheet.setColumnWidth(COLUMN_STATUS, 150);    // Status
     sheet.setColumnWidth(COLUMN_RESPONSE, 500);  // Response
     sheet.setColumnWidth(COLUMN_SLACK_ID, 120);  // Slack ID
+    sheet.setColumnWidth(COLUMN_LAST_SENT_TS, 130); // Last Sent Timestamp
 
     // Freeze header row
     sheet.setFrozenRows(ROW_HEADERS);
-  } else if (!headerRow[4] || headerRow[4].toString().trim() !== 'Slack ID') {
-    // Existing sheet: add Slack ID column if missing
-    const slackIdHeader = sheet.getRange(ROW_HEADERS, COLUMN_SLACK_ID);
-    slackIdHeader.setValue('Slack ID');
-    slackIdHeader.setFontWeight('bold');
-    slackIdHeader.setBackground('#e8eaed');
-    slackIdHeader.setFontColor('#5f6368');
-    slackIdHeader.setNote('Filled automatically when a message is sent. Leave blank—you don\'t need to enter anything here.');
-    sheet.setColumnWidth(COLUMN_SLACK_ID, 120);
-    sheet.getRange(ROW_DATA_START, COLUMN_SLACK_ID, ROW_DATA_START + 199, COLUMN_SLACK_ID).setBackground('#f1f3f4');
+  } else {
+    if (!headerRow[4] || headerRow[4].toString().trim() !== 'Slack ID') {
+      // Existing sheet: add Slack ID column if missing
+      const slackIdHeader = sheet.getRange(ROW_HEADERS, COLUMN_SLACK_ID);
+      slackIdHeader.setValue('Slack ID');
+      slackIdHeader.setFontWeight('bold');
+      slackIdHeader.setBackground('#e8eaed');
+      slackIdHeader.setFontColor('#5f6368');
+      slackIdHeader.setNote('Filled automatically when a message is sent. Leave blank—you don\'t need to enter anything here.');
+      sheet.setColumnWidth(COLUMN_SLACK_ID, 120);
+      sheet.getRange(ROW_DATA_START, COLUMN_SLACK_ID, ROW_DATA_START + 199, COLUMN_SLACK_ID).setBackground('#f1f3f4');
+    }
+    if (!headerRow[5] || headerRow[5].toString().trim() !== 'Last Sent Timestamp') {
+      const lastSentTsHeader = sheet.getRange(ROW_HEADERS, COLUMN_LAST_SENT_TS);
+      lastSentTsHeader.setValue('Last Sent Timestamp');
+      lastSentTsHeader.setFontWeight('bold');
+      lastSentTsHeader.setBackground('#e8eaed');
+      lastSentTsHeader.setFontColor('#5f6368');
+      lastSentTsHeader.setNote('Filled when you send. Read Responses only shows messages the recipient sent after this time (excluding the BulkDM message itself).');
+      lastSentTsHeader.setNumberFormat('@');
+      sheet.setColumnWidth(COLUMN_LAST_SENT_TS, 130);
+      sheet.getRange(ROW_DATA_START, COLUMN_LAST_SENT_TS, ROW_DATA_START + 199, COLUMN_LAST_SENT_TS).setNumberFormat('@');
+      sheet.getRange(ROW_DATA_START, COLUMN_LAST_SENT_TS, ROW_DATA_START + 199, COLUMN_LAST_SENT_TS).setBackground('#f1f3f4');
+    }
   }
 }
 
@@ -358,7 +410,7 @@ function getTargetSheet() {
   if (!tabName || tabName.toString().trim() === '') {
     SpreadsheetApp.getUi().alert(
       'Configuration Required',
-      `Please enter a TAB NAME in row ${ROW_TAB_NAME_VALUE}, column A.\n\nThis should be the name of the tab where your data lives.`,
+      `The data tab name is usually auto-filled when the sheet loads.\n\nEnter the name of the tab where your recipient data lives in row ${ROW_TAB_NAME_VALUE}, column A (often the same as the current tab).`,
       SpreadsheetApp.getUi().ButtonSet.OK
     );
     return null;
@@ -372,7 +424,7 @@ function getTargetSheet() {
     if (!targetSheet) {
       SpreadsheetApp.getUi().alert(
         'Tab Not Found',
-        `The tab "${tabNameStr}" does not exist.\n\nPlease check the TAB NAME in row ${ROW_TAB_NAME_VALUE}, column A and make sure the tab exists in this spreadsheet.`,
+        `The tab "${tabNameStr}" does not exist.\n\nCheck the tab name in row ${ROW_TAB_NAME_VALUE}, column A. It is usually auto-filled with the current tab name.`,
         SpreadsheetApp.getUi().ButtonSet.OK
       );
       return null;
@@ -425,7 +477,7 @@ function getSlackToken() {
 
 /**
  * Saves the Slack token to Document Properties (used after Connect to Slack or "I've connected Slack").
- * Sets TOKEN TYPE to User so messages send from their account.
+ * Sets TOKEN TYPE in the sheet to User or Bot based on the token (xoxp = User, xoxb = Bot).
  */
 function saveSlackToken(token) {
   if (!token || String(token).trim().length === 0) {
@@ -436,7 +488,8 @@ function saveSlackToken(token) {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
   if (sheet) {
     try {
-      sheet.getRange(ROW_TOKEN_TYPE_VALUE, COLUMN_RECIPIENT).setValue('User');
+      const tokenType = t.indexOf('xoxp-') === 0 ? 'User' : 'Bot';
+      sheet.getRange(ROW_TOKEN_TYPE_VALUE, COLUMN_RECIPIENT).setValue(tokenType);
     } catch (e) {}
   }
   return { ok: true };
@@ -481,7 +534,7 @@ function sendAllMessages() {
     return;
   }
   
-  const dataRange = sheet.getRange(ROW_DATA_START, 1, lastRow - ROW_HEADERS, 5);
+  const dataRange = sheet.getRange(ROW_DATA_START, 1, lastRow - ROW_HEADERS, 6);
   const values = dataRange.getValues();
 
   if (values.length === 0) {
@@ -605,6 +658,11 @@ function sendAllMessages() {
     if (result.success) {
       sheet.getRange(row, COLUMN_STATUS).setValue('✅ Sent');
       sheet.getRange(row, COLUMN_SLACK_ID).setValue(userId); // Save for next time
+      if (result.ts) {
+        const tsCell = sheet.getRange(row, COLUMN_LAST_SENT_TS);
+        tsCell.setNumberFormat('@');
+        tsCell.setValue(result.ts); // Read Responses only shows recipient messages after this (excluding this message)
+      }
       successCount++;
     } else {
       const friendlyError = getSlackErrorMessage(result.error);
@@ -657,17 +715,6 @@ function readAllResponses() {
   }
   const senderUserId = senderInfo.user_id;
   
-  // Get all Slack users for matching (cached when possible)
-  try {
-    SpreadsheetApp.getActiveSpreadsheet().toast('Loading workspace members...', 'BulkDM', 15);
-  } catch (e) {}
-  const slackUsers = getAllSlackUsers();
-  if (!slackUsers) {
-    const tokenType = getTokenType();
-    ui.alert('Error', `Failed to connect to Slack. Please check your ${tokenType} token.`, ui.ButtonSet.OK);
-    return;
-  }
-  
   // Get data from sheet (starting from ROW_DATA_START)
   const lastRow = sheet.getLastRow();
   if (lastRow < ROW_DATA_START) {
@@ -675,14 +722,14 @@ function readAllResponses() {
     return;
   }
   
-  const dataRange = sheet.getRange(ROW_DATA_START, 1, lastRow - ROW_HEADERS, 5);
+  const dataRange = sheet.getRange(ROW_DATA_START, 1, lastRow - ROW_HEADERS, 6);
   const values = dataRange.getValues();
-  
+
   if (values.length === 0) {
     ui.alert('No Data', `Please add recipient names starting from row ${ROW_DATA_START}.`, ui.ButtonSet.OK);
     return;
   }
-  
+
   // Confirm before reading
   const response = ui.alert(
     'Read Responses?',
@@ -693,126 +740,151 @@ function readAllResponses() {
   if (response !== ui.Button.YES) {
     return;
   }
-  
-  // Get all DM conversations
-  const dmResult = getAllDMConversations();
-  if (dmResult === null) {
-    ui.alert('No Conversations', 'No DM conversations found.', ui.ButtonSet.OK);
-    return;
-  }
-  if (typeof dmResult === 'object' && dmResult.error) {
-    const hint = dmResult.error === 'missing_scope'
-      ? '\n\nAdd im:read to your Slack app (api.slack.com → OAuth & Permissions): under Bot Token Scopes if using a Bot token, or User Token Scopes if using a User token. Then re-connect (Slack Tools → Connect to Slack) or re-paste the token.'
-      : '';
-    ui.alert('Cannot list DMs', 'Slack returned: ' + dmResult.error + hint, ui.ButtonSet.OK);
-    return;
-  }
-  const dmConversations = Array.isArray(dmResult) ? dmResult : [];
-  if (dmConversations.length === 0) {
-    ui.alert('No Conversations', 'No DM conversations found.', ui.ButtonSet.OK);
-    return;
-  }
-  
-  // Create a map of user ID to user info for quick lookup
-  const userMap = {};
-  for (const user of slackUsers) {
-    userMap[user.id] = user;
-  }
 
-  // Map: Slack user ID -> sheet row number (from Slack ID column)
-  const slackIdToRow = {};
-  for (let i = 0; i < values.length; i++) {
-    const slackId = values[i][COLUMN_SLACK_ID - 1];
-    if (slackId && looksLikeSlackUserId(slackId)) {
-      slackIdToRow[String(slackId).trim()] = ROW_DATA_START + i;
-    }
-  }
-
-  // Create a map of recipient name/email to row number (fallback when no Slack ID)
-  const recipientMap = {};
+  // Rows with Slack ID use quick path (conversations.open + history). Others need full DM list + user list.
+  const rowsWithSlackId = [];
+  const rowsWithoutSlackIdSet = {};
   for (let i = 0; i < values.length; i++) {
     const recipient = values[i][COLUMN_RECIPIENT - 1];
-    if (recipient) {
-      recipientMap[recipient.toString().trim().toLowerCase()] = ROW_DATA_START + i; // row number
+    const slackId = values[i][COLUMN_SLACK_ID - 1];
+    const lastSentTs = values[i][COLUMN_LAST_SENT_TS - 1];
+    const rowNum = ROW_DATA_START + i;
+    if (!recipient) continue;
+    if (looksLikeSlackUserId(slackId)) {
+      rowsWithSlackId.push({ rowNum, slackId: String(slackId).trim(), lastSentTs });
+    } else {
+      rowsWithoutSlackIdSet[rowNum] = true;
     }
   }
-  
+
   let foundCount = 0;
   let responseCount = 0;
-  
-  // Process each DM conversation
-  for (const conversation of dmConversations) {
-    // Get the other user in the DM (not the sender)
-    const otherUserId = conversation.user;
-    if (!otherUserId || otherUserId === senderUserId) {
-      continue;
-    }
 
-    // Prefer matching by saved Slack ID (works even if user left workspace)
-    let matchedRow = slackIdToRow[otherUserId] || null;
-    if (!matchedRow) {
-      const otherUser = userMap[otherUserId];
-      if (!otherUser) {
+  // Quick path: use saved Slack ID to open DM and read history (no need to list all DMs or users)
+  if (rowsWithSlackId.length > 0) {
+    try {
+      SpreadsheetApp.getActiveSpreadsheet().toast('Reading responses (by Slack ID)...', 'BulkDM', 5);
+    } catch (e) {}
+    const slackIdToChannelId = {};
+    for (const { rowNum, slackId, lastSentTs } of rowsWithSlackId) {
+      let channelId = slackIdToChannelId[slackId];
+      if (!channelId) {
+        channelId = getChannelIdForUser(slackId);
+        if (channelId) slackIdToChannelId[slackId] = channelId;
+      }
+      sheet.getRange(rowNum, COLUMN_RESPONSE).setValue('⏳ Reading...');
+      SpreadsheetApp.flush();
+      if (!channelId) {
+        sheet.getRange(rowNum, COLUMN_RESPONSE).setValue('❌ Error reading');
         continue;
       }
-      const userEmail = otherUser.profile && otherUser.profile.email ? otherUser.profile.email.toLowerCase() : '';
-      const userName = otherUser.name ? otherUser.name.toLowerCase() : '';
-      const userDisplayName = otherUser.profile && otherUser.profile.display_name ?
-        otherUser.profile.display_name.toLowerCase() : '';
-      const userRealName = otherUser.profile && otherUser.profile.real_name ?
-        otherUser.profile.real_name.toLowerCase() : '';
+      const messages = getConversationHistory(channelId);
+      if (!messages) {
+        sheet.getRange(rowNum, COLUMN_RESPONSE).setValue('❌ Error reading');
+        continue;
+      }
+      const sentTsStr = lastSentTs !== undefined && lastSentTs !== null && lastSentTs !== '' ? (typeof lastSentTs === 'number' ? lastSentTs.toFixed(6) : String(lastSentTs).trim()) : '';
+      // Only messages after our sent time: use string comparison so we exclude the BulkDM message (exact ts match) without float rounding issues
+      const recipientMessages = messages.filter(msg =>
+        msg.user === slackId && msg.text && !msg.subtype &&
+        (!sentTsStr || (msg.ts > sentTsStr))
+      );
+      foundCount++;
+      if (recipientMessages.length === 0) {
+        sheet.getRange(rowNum, COLUMN_RESPONSE).setValue('No response yet');
+      } else {
+        recipientMessages.sort((a, b) => parseFloat(b.ts) - parseFloat(a.ts));
+        recipientMessages.reverse();
+        const allResponses = recipientMessages.map(msg => msg.text).join('\n\n---\n\n');
+        sheet.getRange(rowNum, COLUMN_RESPONSE).setValue(allResponses);
+        responseCount += recipientMessages.length;
+      }
+      Utilities.sleep(200);
+    }
+  }
 
-      for (const [recipientKey, rowNum] of Object.entries(recipientMap)) {
-        const recipientLower = recipientKey;
-        if (recipientLower === userEmail ||
-            recipientLower === userName ||
-            recipientLower === userDisplayName ||
-            recipientLower === userRealName ||
-            (userRealName && (userRealName.includes(recipientLower) || recipientLower.includes(userRealName)))) {
+  // Fallback: rows without Slack ID — list all DMs and match by name/email
+  if (Object.keys(rowsWithoutSlackIdSet).length > 0) {
+    try {
+      SpreadsheetApp.getActiveSpreadsheet().toast('Loading workspace members...', 'BulkDM', 15);
+    } catch (e) {}
+    const slackUsers = getAllSlackUsers();
+    if (!slackUsers) {
+      ui.alert('Error', `Failed to connect to Slack. Please check your ${tokenType} token.`, ui.ButtonSet.OK);
+      return;
+    }
+    const userMap = {};
+    for (const user of slackUsers) {
+      userMap[user.id] = user;
+    }
+    const recipientMapNoSlackId = {};
+    for (let i = 0; i < values.length; i++) {
+      const recipient = values[i][COLUMN_RECIPIENT - 1];
+      const slackId = values[i][COLUMN_SLACK_ID - 1];
+      const rowNum = ROW_DATA_START + i;
+      if (recipient && !looksLikeSlackUserId(slackId)) {
+        recipientMapNoSlackId[recipient.toString().trim().toLowerCase()] = rowNum;
+      }
+    }
+    const dmResult = getAllDMConversations();
+    if (dmResult === null) {
+      if (foundCount === 0) {
+        ui.alert('No Conversations', 'No DM conversations found.', ui.ButtonSet.OK);
+      }
+    } else if (typeof dmResult === 'object' && dmResult.error) {
+      const hint = dmResult.error === 'missing_scope'
+        ? '\n\nAdd im:read to your Slack app (api.slack.com → OAuth & Permissions): under Bot Token Scopes if using a Bot token, or User Token Scopes if using a User token. Then re-connect (Slack Tools → Connect to Slack) or re-paste the token.'
+        : '';
+      ui.alert('Cannot list DMs', 'Slack returned: ' + dmResult.error + hint, ui.ButtonSet.OK);
+      return;
+    }
+    const dmConversations = Array.isArray(dmResult) ? dmResult : [];
+    for (const conversation of dmConversations) {
+      const otherUserId = conversation.user;
+      if (!otherUserId || otherUserId === senderUserId) continue;
+      const otherUser = userMap[otherUserId];
+      if (!otherUser) continue;
+      let matchedRow = null;
+      const userEmail = (otherUser.profile && otherUser.profile.email) ? otherUser.profile.email.toLowerCase() : '';
+      const userName = otherUser.name ? otherUser.name.toLowerCase() : '';
+      const userDisplayName = (otherUser.profile && otherUser.profile.display_name) ? otherUser.profile.display_name.toLowerCase() : '';
+      const userRealName = (otherUser.profile && otherUser.profile.real_name) ? otherUser.profile.real_name.toLowerCase() : '';
+      for (const [key, rowNum] of Object.entries(recipientMapNoSlackId)) {
+        if (key === userEmail || key === userName || key === userDisplayName || key === userRealName ||
+            (userRealName && (userRealName.includes(key) || key.includes(userRealName)))) {
           matchedRow = rowNum;
           break;
         }
       }
+      if (!matchedRow || !rowsWithoutSlackIdSet[matchedRow]) continue;
+      foundCount++;
+      sheet.getRange(matchedRow, COLUMN_RESPONSE).setValue('⏳ Reading...');
+      SpreadsheetApp.flush();
+      const messages = getConversationHistory(conversation.id);
+      if (!messages) {
+        sheet.getRange(matchedRow, COLUMN_RESPONSE).setValue('❌ Error reading');
+        continue;
+      }
+      const lastSentTs = values[matchedRow - ROW_DATA_START][COLUMN_LAST_SENT_TS - 1];
+      const sentTsStr = lastSentTs !== undefined && lastSentTs !== null && lastSentTs !== '' ? (typeof lastSentTs === 'number' ? lastSentTs.toFixed(6) : String(lastSentTs).trim()) : '';
+      // Only messages after our sent time: use string comparison so we exclude the BulkDM message (exact ts match) without float rounding issues
+      const recipientMessages = messages.filter(msg =>
+        msg.user === otherUserId && msg.text && !msg.subtype &&
+        (!sentTsStr || (msg.ts > sentTsStr))
+      );
+      if (recipientMessages.length === 0) {
+        sheet.getRange(matchedRow, COLUMN_RESPONSE).setValue('No response yet');
+      } else {
+        recipientMessages.sort((a, b) => parseFloat(b.ts) - parseFloat(a.ts));
+        recipientMessages.reverse();
+        const allResponses = recipientMessages.map(msg => msg.text).join('\n\n---\n\n');
+        sheet.getRange(matchedRow, COLUMN_RESPONSE).setValue(allResponses);
+        responseCount += recipientMessages.length;
+      }
+      Utilities.sleep(200);
     }
-    
-    if (!matchedRow) {
-      continue; // No match found in sheet
-    }
-    
-    foundCount++;
-    
-    // Update status to processing
-    sheet.getRange(matchedRow, COLUMN_RESPONSE).setValue('⏳ Reading...');
-    SpreadsheetApp.flush();
-    
-    // Get conversation history
-    const messages = getConversationHistory(conversation.id);
-    if (!messages) {
-      sheet.getRange(matchedRow, COLUMN_RESPONSE).setValue('❌ Error reading');
-      continue;
-    }
-    
-    // Filter to only messages from the recipient (not from bot)
-    const recipientMessages = messages.filter(msg => 
-      msg.user === otherUserId && msg.text && !msg.subtype
-    );
-    
-    if (recipientMessages.length === 0) {
-      sheet.getRange(matchedRow, COLUMN_RESPONSE).setValue('No response yet');
-    } else {
-      // Combine all messages into one response (newest first, then reverse)
-      recipientMessages.sort((a, b) => parseFloat(b.ts) - parseFloat(a.ts)); // Sort by timestamp
-      recipientMessages.reverse(); // Oldest first
-      const allResponses = recipientMessages.map(msg => msg.text).join('\n\n---\n\n');
-      
-      sheet.getRange(matchedRow, COLUMN_RESPONSE).setValue(allResponses);
-      responseCount += recipientMessages.length;
-    }
-    
-    // Rate limiting
-    Utilities.sleep(200); // Small delay between conversations
   }
-  
+
   // Show completion message
   ui.alert(
     'Complete!',
@@ -839,9 +911,9 @@ function testSlackConnection() {
     const tokenType = getTokenType();
     ui.alert(
       'Connection successful',
-      'Your Slack token is valid.\n\n' +
+      'Your Slack connection is valid.\n\n' +
       'Messages will be sent from your ' + (tokenType === 'User' ? 'Slack account' : 'bot') + '.\n\n' +
-      'The first time you use Send Messages or Read Responses, the workspace member list will load (may take a minute for large workspaces); after that it is cached for 1 hour.',
+      'Use Slack Tools → Send Messages to send DMs, and Read Responses to pull replies into the sheet.',
       ui.ButtonSet.OK
     );
   } else {
@@ -1329,8 +1401,32 @@ function getConversationHistory(channelId) {
 }
 
 /**
- * Send a direct message to a Slack user
+ * Get the DM channel ID for a Slack user (opens DM if needed).
+ * Returns channel ID string or null.
  */
+function getChannelIdForUser(slackUserId) {
+  try {
+    const token = getSlackToken();
+    if (!token || !slackUserId) return null;
+    const response = UrlFetchApp.fetch('https://slack.com/api/conversations.open', {
+      method: 'post',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      payload: JSON.stringify({ users: slackUserId })
+    });
+    const data = JSON.parse(response.getContentText());
+    if (data.ok && data.channel && data.channel.id) {
+      return data.channel.id;
+    }
+    Logger.log('conversations.open error: ' + (data.error || 'unknown'));
+    return null;
+  } catch (e) {
+    Logger.log('getChannelIdForUser: ' + e);
+    return null;
+  }
+}
 function sendSlackDM(userId, message) {
   try {
     // First, open or get the DM channel
@@ -1396,7 +1492,7 @@ function sendSlackDM(userId, message) {
     const chatData = JSON.parse(chatResponse.getContentText());
     
     if (chatData.ok) {
-      return { success: true };
+      return { success: true, ts: chatData.ts || (chatData.message && chatData.message.ts) || '' };
     } else {
       return {
         success: false,
