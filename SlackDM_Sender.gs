@@ -375,8 +375,8 @@ function setupHeaders() {
     lastSentTsHeader.setNumberFormat('@'); // Keep as text so precision is preserved for filtering
 
     // Light gray background on Slack ID and Last Sent Timestamp data cells
-    sheet.getRange(ROW_DATA_START, COLUMN_SLACK_ID, ROW_DATA_START + 199, 2).setBackground('#f1f3f4');
-    sheet.getRange(ROW_DATA_START, COLUMN_LAST_SENT_TS, ROW_DATA_START + 199, 2).setBackground('#f1f3f4').setNumberFormat('@');
+    sheet.getRange(ROW_DATA_START, COLUMN_SLACK_ID, ROW_DATA_START + 199, 1).setBackground('#f1f3f4');
+    sheet.getRange(ROW_DATA_START, COLUMN_LAST_SENT_TS, ROW_DATA_START + 199, 1).setBackground('#f1f3f4').setNumberFormat('@');
 
     // Set column widths for better readability
     sheet.setColumnWidth(COLUMN_RECIPIENT, 200); // Recipient Email
@@ -398,7 +398,7 @@ function setupHeaders() {
       slackIdHeader.setFontColor('#5f6368');
       slackIdHeader.setNote('Filled automatically when a message is sent. Leave blank—you don\'t need to enter anything here.');
       sheet.setColumnWidth(COLUMN_SLACK_ID, 120);
-      sheet.getRange(ROW_DATA_START, COLUMN_SLACK_ID, ROW_DATA_START + 199, 2).setBackground('#f1f3f4');
+      sheet.getRange(ROW_DATA_START, COLUMN_SLACK_ID, ROW_DATA_START + 199, 1).setBackground('#f1f3f4');
     }
     if (!headerRow[5] || headerRow[5].toString().trim() !== 'Last Sent Timestamp') {
       const lastSentTsHeader = sheet.getRange(ROW_HEADERS, COLUMN_LAST_SENT_TS);
@@ -409,8 +409,8 @@ function setupHeaders() {
       lastSentTsHeader.setNote('Filled when you send. Read Responses only shows messages the recipient sent after this time (excluding the BulkDM message itself).');
       lastSentTsHeader.setNumberFormat('@');
       sheet.setColumnWidth(COLUMN_LAST_SENT_TS, 130);
-      sheet.getRange(ROW_DATA_START, COLUMN_LAST_SENT_TS, ROW_DATA_START + 199, 2).setNumberFormat('@');
-      sheet.getRange(ROW_DATA_START, COLUMN_LAST_SENT_TS, ROW_DATA_START + 199, 2).setBackground('#f1f3f4');
+      sheet.getRange(ROW_DATA_START, COLUMN_LAST_SENT_TS, ROW_DATA_START + 199, 1).setNumberFormat('@');
+      sheet.getRange(ROW_DATA_START, COLUMN_LAST_SENT_TS, ROW_DATA_START + 199, 1).setBackground('#f1f3f4');
     }
   }
 }
