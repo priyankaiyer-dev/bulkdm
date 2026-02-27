@@ -34,11 +34,11 @@
  * • Slack app scopes (api.slack.com → your app → OAuth & Permissions):
  *   Bot: chat:write, im:write, users:read, im:read, im:history. User: chat:write, im:write, users:read, users:read.email, im:read, im:history. Then use Connect to Slack in the sheet for User.
  * • Refresh the sheet. You should see Slack Tools. If not, in Apps Script choose "onOpen" and click Run once.
-
+ */
 // ============================================
 // CONFIG
 // ============================================
-
+ 
 // DO NOT CHANGE:
 const SLACK_BOT_TOKEN = 'YOUR_SLACK_BOT_TOKEN';
 const SLACK_CLIENT_ID = '3895842157.10360289984709';
@@ -375,8 +375,8 @@ function setupHeaders() {
     lastSentTsHeader.setNumberFormat('@'); // Keep as text so precision is preserved for filtering
 
     // Light gray background on Slack ID and Last Sent Timestamp data cells
-    sheet.getRange(ROW_DATA_START, COLUMN_SLACK_ID, ROW_DATA_START + 199, COLUMN_SLACK_ID).setBackground('#f1f3f4');
-    sheet.getRange(ROW_DATA_START, COLUMN_LAST_SENT_TS, ROW_DATA_START + 199, COLUMN_LAST_SENT_TS).setBackground('#f1f3f4').setNumberFormat('@');
+    sheet.getRange(ROW_DATA_START, COLUMN_SLACK_ID, ROW_DATA_START + 199, 2).setBackground('#f1f3f4');
+    sheet.getRange(ROW_DATA_START, COLUMN_LAST_SENT_TS, ROW_DATA_START + 199, 2).setBackground('#f1f3f4').setNumberFormat('@');
 
     // Set column widths for better readability
     sheet.setColumnWidth(COLUMN_RECIPIENT, 200); // Recipient Email
@@ -398,7 +398,7 @@ function setupHeaders() {
       slackIdHeader.setFontColor('#5f6368');
       slackIdHeader.setNote('Filled automatically when a message is sent. Leave blank—you don\'t need to enter anything here.');
       sheet.setColumnWidth(COLUMN_SLACK_ID, 120);
-      sheet.getRange(ROW_DATA_START, COLUMN_SLACK_ID, ROW_DATA_START + 199, COLUMN_SLACK_ID).setBackground('#f1f3f4');
+      sheet.getRange(ROW_DATA_START, COLUMN_SLACK_ID, ROW_DATA_START + 199, 2).setBackground('#f1f3f4');
     }
     if (!headerRow[5] || headerRow[5].toString().trim() !== 'Last Sent Timestamp') {
       const lastSentTsHeader = sheet.getRange(ROW_HEADERS, COLUMN_LAST_SENT_TS);
@@ -409,8 +409,8 @@ function setupHeaders() {
       lastSentTsHeader.setNote('Filled when you send. Read Responses only shows messages the recipient sent after this time (excluding the BulkDM message itself).');
       lastSentTsHeader.setNumberFormat('@');
       sheet.setColumnWidth(COLUMN_LAST_SENT_TS, 130);
-      sheet.getRange(ROW_DATA_START, COLUMN_LAST_SENT_TS, ROW_DATA_START + 199, COLUMN_LAST_SENT_TS).setNumberFormat('@');
-      sheet.getRange(ROW_DATA_START, COLUMN_LAST_SENT_TS, ROW_DATA_START + 199, COLUMN_LAST_SENT_TS).setBackground('#f1f3f4');
+      sheet.getRange(ROW_DATA_START, COLUMN_LAST_SENT_TS, ROW_DATA_START + 199, 2).setNumberFormat('@');
+      sheet.getRange(ROW_DATA_START, COLUMN_LAST_SENT_TS, ROW_DATA_START + 199, 2).setBackground('#f1f3f4');
     }
   }
 }
