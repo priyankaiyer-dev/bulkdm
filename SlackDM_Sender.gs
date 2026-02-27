@@ -9,7 +9,7 @@
  *
  * 2. Add your data (the only required input):
  *    From row 6 down, add one row per recipient.
- *    • Column A (Recipient Name): who to message – full name or email.
+ *    • Column A (Recipient Email): who to message – email is best but name also works. Name will take about ~1-2 minutes the first time you run the script.
  *    • Column B (Message): the message to send.
  *    Columns C–F (Status, Response, Slack ID, Last Sent Timestamp) are filled in automatically; leave them blank.
  *
@@ -34,23 +34,28 @@
  * • Slack app scopes (api.slack.com → your app → OAuth & Permissions):
  *   Bot: chat:write, im:write, users:read, im:read, im:history. User: chat:write, im:write, users:read, users:read.email, im:read, im:history. Then use Connect to Slack in the sheet for User.
  * • Refresh the sheet. You should see Slack Tools. If not, in Apps Script choose "onOpen" and click Run once.
- */
+
+// ============================================
+// CONFIG
+// ============================================
+
+// DO NOT CHANGE:
 const SLACK_BOT_TOKEN = 'YOUR_SLACK_BOT_TOKEN';
 const SLACK_CLIENT_ID = '3895842157.10360289984709';
 const SLACK_CLIENT_SECRET = '19ea914a1237c9b07f677b53efe83045';
 const SLACK_REDIRECT_URI = 'https://script.google.com/a/macros/samsara.com/s/AKfycbzWeDVnX7JPvOOto8bdkDILeOgs1TmJAH01iXrfo8JHewLeWXw2HfQq53_b7nRPKuv6/exec';
 
-// User scopes requested when someone clicks "Add to Slack" (for sending DMs as themselves)
+// DO NOT CHANGE: User scopes requested when someone clicks "Add to Slack" (for sending DMs as themselves)
 // users:read.email enables lookup-by-email so we only look up recipients instead of pulling the full list
 const SLACK_USER_SCOPES = 'chat:write,im:write,users:read,users:read.email,im:read,im:history';
 
-// Key for storing token in Document Properties (per-sheet); no copy-paste needed after Connect to Slack
+// DO NOT CHANGE: Key for storing token in Document Properties (per-sheet); no copy-paste needed after Connect to Slack
 const SLACK_TOKEN_PROPERTY = 'SLACK_TOKEN';
 
-// Set to 200 or 400 to only fetch that many users (faster first run). Set to 0 to fetch all (slower).
+// OPTIONAL: Set to 200 or 400 to only fetch that many users (faster first run). Set to 0 to fetch all (slower).
 const MAX_USERS_TO_FETCH = 0;
 
-// Optional: Customize these if your sheet has different column positions
+// OPTIONAL: Customize these if your sheet has different column positions
 const COLUMN_RECIPIENT = 1; // Column A
 const COLUMN_MESSAGE = 2;   // Column B
 const COLUMN_STATUS = 3;   // Column C
@@ -58,7 +63,7 @@ const COLUMN_RESPONSE = 4;  // Column D - Recipient responses
 const COLUMN_SLACK_ID = 5;  // Column E - Slack user ID (filled on first successful send)
 const COLUMN_LAST_SENT_TS = 6; // Column F - Timestamp of our last sent message (Read Responses only shows recipient messages after this, excluding the BulkDM message itself)
 
-// Configuration row positions
+// OPTIONAL: Configuration row positions
 const ROW_TAB_NAME_LABEL = 1;      // Row 1: "TAB NAME:"
 const ROW_TAB_NAME_VALUE = 2;      // Row 2: [Input field for tab name]
 const ROW_TOKEN_TYPE_LABEL = 3;     // Row 3: "TOKEN TYPE:"
@@ -116,8 +121,8 @@ function showGetUserTokenDialog() {
     '<li>Click the link below (opens in your browser)</li>' +
     '<li>Click <strong>Allow</strong> to install BulkDM</li>' +
     '<li>Copy the <strong>User Token</strong> shown on the next page</li>' +
-    '<li>Paste it in Extensions → Apps Script as <code>SLACK_BOT_TOKEN</code>, or paste in the sheet if you use a different setup</li>' +
-    '<li>Set TOKEN TYPE to <strong>User</strong> in row 4</li>' +
+    '<li>Open <strong>Slack Tools → Connect to Slack</strong>, paste into the box, and click <strong>Save token</strong></li>' +
+    '<li>Token type is set automatically when you save.</li>' +
     '</ol>' +
     '<p><a href="' + redirectUri + '" target="_blank" style="font-size:14px;">Open Get User Token page</a></p>' +
     '<p style="font-size:11px; color:#666;">If the link does not open, copy this URL: ' + redirectUri + '</p>'
@@ -330,27 +335,38 @@ function setupHeaders() {
 
   if (!hasHeaders) {
     // Set up headers (including Slack ID and Last Sent Timestamp)
-    sheet.getRange(ROW_HEADERS, COLUMN_RECIPIENT).setValue('Recipient Name');
+    sheet.getRange(ROW_HEADERS, COLUMN_RECIPIENT).setValue('Recipient Email');
     sheet.getRange(ROW_HEADERS, COLUMN_MESSAGE).setValue('Message');
     sheet.getRange(ROW_HEADERS, COLUMN_STATUS).setValue('Status');
     sheet.getRange(ROW_HEADERS, COLUMN_RESPONSE).setValue('Response');
     sheet.getRange(ROW_HEADERS, COLUMN_SLACK_ID).setValue('Slack ID');
     sheet.getRange(ROW_HEADERS, COLUMN_LAST_SENT_TS).setValue('Last Sent Timestamp');
 
-    // Format header row (bold, background color) for user-input columns A–D
-    const headerRange = sheet.getRange(ROW_HEADERS, 1, ROW_HEADERS, 4);
+    // Format header row (bold, background color) for user-input columns A–B
+    const headerRange = sheet.getRange(ROW_HEADERS, 1, 1, 2);
     headerRange.setFontWeight('bold');
     headerRange.setBackground('#4285f4');
     headerRange.setFontColor('#ffffff');
+
+    // Status and Response headers (gray, auto-filled)
+    const statusResponseRange = sheet.getRange(ROW_HEADERS, COLUMN_STATUS, 1, 2);
+    statusResponseRange.setFontWeight('bold');
+    statusResponseRange.setBackground('#e8eaed');
+    statusResponseRange.setFontColor('#5f6368');
+    sheet.getRange(ROW_HEADERS, COLUMN_STATUS).setNote('Filled automatically when messages are sent.');
+    sheet.getRange(ROW_HEADERS, COLUMN_RESPONSE).setNote('Filled when you call Slack Tools → Read Responses. Only shows messages the recipient sent after your BulkDM message (excluding the BulkDM message itself).');
+
+    // Recipient column note
+    sheet.getRange(ROW_HEADERS, COLUMN_RECIPIENT).setNote('Email is fastest but you can also add their full name as displayed in Slack. Name will take about ~1–2 minutes the first time you run the script.');
 
     // Slack ID column: distinct style to show it's auto-filled (no user input needed)
     const slackIdHeader = sheet.getRange(ROW_HEADERS, COLUMN_SLACK_ID);
     slackIdHeader.setFontWeight('bold');
     slackIdHeader.setBackground('#e8eaed');
     slackIdHeader.setFontColor('#5f6368');
-    slackIdHeader.setNote('Filled automatically when a message is sent. Leave blank—you don\'t need to enter anything here.');
+    slackIdHeader.setNote('Filled automatically when a message is sent. Leave blank—you don\'t need to enter anything here.\n\nTo speed up, you can find a user\'s Slack ID from their profile (click the three dots).');
 
-    // Last Sent Timestamp column: when we sent the BulkDM message (Read Responses only shows replies after it, excluding that message)
+    // Last Sent Timestamp column
     const lastSentTsHeader = sheet.getRange(ROW_HEADERS, COLUMN_LAST_SENT_TS);
     lastSentTsHeader.setFontWeight('bold');
     lastSentTsHeader.setBackground('#e8eaed');
@@ -363,9 +379,9 @@ function setupHeaders() {
     sheet.getRange(ROW_DATA_START, COLUMN_LAST_SENT_TS, ROW_DATA_START + 199, COLUMN_LAST_SENT_TS).setBackground('#f1f3f4').setNumberFormat('@');
 
     // Set column widths for better readability
-    sheet.setColumnWidth(COLUMN_RECIPIENT, 200); // Recipient Name
+    sheet.setColumnWidth(COLUMN_RECIPIENT, 200); // Recipient Email
     sheet.setColumnWidth(COLUMN_MESSAGE, 400);   // Message
-    sheet.setColumnWidth(COLUMN_STATUS, 150);    // Status
+    sheet.setColumnWidth(COLUMN_STATUS, 150);   // Status
     sheet.setColumnWidth(COLUMN_RESPONSE, 500);  // Response
     sheet.setColumnWidth(COLUMN_SLACK_ID, 120);  // Slack ID
     sheet.setColumnWidth(COLUMN_LAST_SENT_TS, 130); // Last Sent Timestamp
@@ -530,7 +546,7 @@ function sendAllMessages() {
   // Get data from sheet (starting from ROW_DATA_START)
   const lastRow = sheet.getLastRow();
   if (lastRow < ROW_DATA_START) {
-    ui.alert('No Data', `Please add recipient names and messages starting from row ${ROW_DATA_START}.`, ui.ButtonSet.OK);
+    ui.alert('No Data', `Please add recipient emails and messages starting from row ${ROW_DATA_START}.`, ui.ButtonSet.OK);
     return;
   }
   
@@ -538,7 +554,7 @@ function sendAllMessages() {
   const values = dataRange.getValues();
 
   if (values.length === 0) {
-    ui.alert('No Data', `Please add recipient names and messages starting from row ${ROW_DATA_START}.`, ui.ButtonSet.OK);
+    ui.alert('No Data', `Please add recipient emails and messages starting from row ${ROW_DATA_START}.`, ui.ButtonSet.OK);
     return;
   }
 
@@ -718,7 +734,7 @@ function readAllResponses() {
   // Get data from sheet (starting from ROW_DATA_START)
   const lastRow = sheet.getLastRow();
   if (lastRow < ROW_DATA_START) {
-    ui.alert('No Data', `Please add recipient names starting from row ${ROW_DATA_START}.`, ui.ButtonSet.OK);
+    ui.alert('No Data', `Please add recipient emails starting from row ${ROW_DATA_START}.`, ui.ButtonSet.OK);
     return;
   }
   
@@ -726,7 +742,7 @@ function readAllResponses() {
   const values = dataRange.getValues();
 
   if (values.length === 0) {
-    ui.alert('No Data', `Please add recipient names starting from row ${ROW_DATA_START}.`, ui.ButtonSet.OK);
+    ui.alert('No Data', `Please add recipient emails starting from row ${ROW_DATA_START}.`, ui.ButtonSet.OK);
     return;
   }
 
@@ -1061,7 +1077,8 @@ function getAllSlackUsersUntilMatched(recipientList) {
   }
 
   try {
-    var allMembers = [];
+    var filtered = [];
+    var lookupMap = {};
     var cursor = '';
     var pageCount = 0;
 
@@ -1100,22 +1117,22 @@ function getAllSlackUsersUntilMatched(recipientList) {
       }
 
       if (data.members && data.members.length > 0) {
-        allMembers.push.apply(allMembers, data.members);
-      }
-
-      var filtered = allMembers.filter(function(u) { return !u.deleted && !u.is_bot; });
-      var lookupMap = buildUserLookupMap(filtered);
-      if (allMatched(filtered, lookupMap)) {
-        try { SpreadsheetApp.getActiveSpreadsheet().toast('All recipients found after ' + pageCount + ' page(s).', 'BulkDM', 3); } catch (e) {}
-        return { users: filtered, lookupMap: lookupMap };
+        var pageFiltered = data.members.filter(function(u) { return !u.deleted && !u.is_bot; });
+        for (var p = 0; p < pageFiltered.length; p++) {
+          filtered.push(pageFiltered[p]);
+          addUserToLookupMap(lookupMap, pageFiltered[p]);
+        }
+        if (allMatched(filtered, lookupMap)) {
+          try { SpreadsheetApp.getActiveSpreadsheet().toast('All recipients found after ' + pageCount + ' page(s).', 'BulkDM', 3); } catch (e) {}
+          return { users: filtered, lookupMap: lookupMap };
+        }
       }
 
       cursor = (data.response_metadata && data.response_metadata.next_cursor) ? data.response_metadata.next_cursor : '';
       if (cursor) Utilities.sleep(1200);
     } while (cursor);
 
-    var filteredFinal = allMembers.filter(function(u) { return !u.deleted && !u.is_bot; });
-    return { users: filteredFinal, lookupMap: buildUserLookupMap(filteredFinal) };
+    return { users: filtered, lookupMap: lookupMap };
   } catch (e) {
     Logger.log('getAllSlackUsersUntilMatched: ' + e);
     return null;
@@ -1171,29 +1188,37 @@ function buildUserLookupMap(slackUsers) {
   var map = {};
   if (!slackUsers) return map;
   for (var u = 0; u < slackUsers.length; u++) {
-    var user = slackUsers[u];
-    var id = user.id;
-    var add = function(key) {
-      if (key && key.length > 0 && map[key] === undefined) {
-        map[key] = id;
-      }
-    };
-    var email = user.profile && user.profile.email ? user.profile.email.toLowerCase().trim() : '';
-    var displayName = user.profile && user.profile.display_name ? user.profile.display_name.toLowerCase().trim() : '';
-    var realName = user.profile && user.profile.real_name ? user.profile.real_name.toLowerCase().trim() : '';
-    var name = user.name ? user.name.toLowerCase().replace('@', '').trim() : '';
-    add(email);
-    add(displayName);
-    add(realName);
-    add(name);
-    if (realName) {
-      var words = realName.split(/\s+/);
-      for (var w = 0; w < words.length; w++) {
-        add(words[w]);
-      }
-    }
+    addUserToLookupMap(map, slackUsers[u]);
   }
   return map;
+}
+
+/**
+ * Add one user's keys to an existing lookup map (only sets if key not already present).
+ * Used to build the map incrementally page-by-page so we don't rebuild from scratch each time.
+ */
+function addUserToLookupMap(map, user) {
+  if (!user || !map) return;
+  var id = user.id;
+  var add = function(key) {
+    if (key && key.length > 0 && map[key] === undefined) {
+      map[key] = id;
+    }
+  };
+  var email = user.profile && user.profile.email ? user.profile.email.toLowerCase().trim() : '';
+  var displayName = user.profile && user.profile.display_name ? user.profile.display_name.toLowerCase().trim() : '';
+  var realName = user.profile && user.profile.real_name ? user.profile.real_name.toLowerCase().trim() : '';
+  var name = user.name ? user.name.toLowerCase().replace('@', '').trim() : '';
+  add(email);
+  add(displayName);
+  add(realName);
+  add(name);
+  if (realName) {
+    var words = realName.split(/\s+/);
+    for (var w = 0; w < words.length; w++) {
+      add(words[w]);
+    }
+  }
 }
 
 /**
