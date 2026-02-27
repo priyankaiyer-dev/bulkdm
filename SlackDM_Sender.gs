@@ -91,8 +91,12 @@ function onOpen() {
     .addItem('Setup Headers', 'setupHeaders')
     .addToUi();
   
-  // Automatically set up headers if sheet is empty or missing headers
-  setupHeaders();
+  // Automatically set up headers only on the BulkDM data tab (the one with "TAB NAME:" in row 1)
+  // so we don't overwrite other tabs like "Instructions"
+  const dataSheet = getBulkDMDataSheet();
+  if (dataSheet) {
+    setupHeadersOnSheet(dataSheet);
+  }
 }
 
 /**
@@ -275,12 +279,35 @@ function exchangeSlackOAuthCode(code, redirectUri, clientId, clientSecret) {
 }
 
 /**
+ * Returns the sheet that contains the BulkDM config (has "TAB NAME:" in row 1), or null if none.
+ * Used so onOpen only formats the data tab, not other tabs like Instructions.
+ */
+function getBulkDMDataSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheets = ss.getSheets();
+  for (let i = 0; i < sheets.length; i++) {
+    const val = sheets[i].getRange(ROW_TAB_NAME_LABEL, COLUMN_RECIPIENT).getValue();
+    if (val && val.toString().trim() === 'TAB NAME:') {
+      return sheets[i];
+    }
+  }
+  return null;
+}
+
+/**
  * Sets up configuration section and column headers in the sheet.
- * Called automatically when the sheet loads (onOpen). Layout and config rows are auto-created.
+ * When called from the menu (Setup Headers), runs on the active sheet.
+ * When called from onOpen, runs only on the tab that already has "TAB NAME:" (getBulkDMDataSheet).
  */
 function setupHeaders() {
-  const sheet = SpreadsheetApp.getActiveSheet();
+  setupHeadersOnSheet(SpreadsheetApp.getActiveSheet());
+}
 
+/**
+ * Sets up configuration section and column headers on the given sheet.
+ * Called automatically on the data tab when the sheet loads (onOpen), or when user runs Setup Headers.
+ */
+function setupHeadersOnSheet(sheet) {
   // Data tab: auto-filled with current sheet name; user only changes if data lives in another tab
   const tabNameLabel = sheet.getRange(ROW_TAB_NAME_LABEL, COLUMN_RECIPIENT).getValue();
   if (!tabNameLabel || tabNameLabel.toString().trim() !== 'TAB NAME:') {
